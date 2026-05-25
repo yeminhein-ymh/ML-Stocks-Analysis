@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -12,16 +14,9 @@ try:
 except Exception:
     st_autorefresh = None
 
-from app.core.analyzer import analyze_stock, prepare_stock, scan_stocks
-from app.core.backtesting import backtest_portfolio, backtest_signal_strategy
-from app.core.config import DEFAULT_WATCHLIST, RISK_RULES, SIGNAL_LOG_FILE, TRADE_LOG_FILE
-from app.core.data import fetch_last_prices, market_data_healthcheck, normalize_tickers
-from app.core.modeling import train_models
-from app.core.paper_trading import cancel_order, log_signal, open_orders_table, place_paper_order, position_size
-from app.core.screener import COMMON_UNIVERSE, screen_universe
-from app.core.watchlists import load_watchlists, parse_uploaded_watchlist, save_watchlist
-
-load_dotenv()
+APP_ROOT = Path(__file__).resolve().parent
+if str(APP_ROOT) not in sys.path:
+    sys.path.insert(0, str(APP_ROOT))
 
 st.set_page_config(
     page_title="Universal AI Stock Analysis Dashboard",
@@ -29,6 +24,31 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+if not (APP_ROOT / "app" / "core" / "analyzer.py").exists():
+    st.error(
+        "Deployment is missing the local app package. Upload or commit the full `app/` folder "
+        "alongside `streamlit_app.py`, then reboot the Streamlit app."
+    )
+    st.stop()
+
+try:
+    from app.core.analyzer import analyze_stock, prepare_stock, scan_stocks
+    from app.core.backtesting import backtest_portfolio, backtest_signal_strategy
+    from app.core.config import DEFAULT_WATCHLIST, RISK_RULES, SIGNAL_LOG_FILE, TRADE_LOG_FILE
+    from app.core.data import fetch_last_prices, market_data_healthcheck, normalize_tickers
+    from app.core.modeling import train_models
+    from app.core.paper_trading import cancel_order, log_signal, open_orders_table, place_paper_order, position_size
+    from app.core.screener import COMMON_UNIVERSE, screen_universe
+    from app.core.watchlists import load_watchlists, parse_uploaded_watchlist, save_watchlist
+except ModuleNotFoundError as exc:
+    st.error(
+        f"Missing Python module `{exc.name}`. On Streamlit Cloud, make sure `requirements.txt` "
+        "is committed and the app has been rebooted after dependency installation."
+    )
+    st.stop()
+
+load_dotenv()
 
 
 def inject_style() -> None:
