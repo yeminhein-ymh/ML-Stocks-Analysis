@@ -25,28 +25,406 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-if not (APP_ROOT / "app" / "core" / "analyzer.py").exists():
-    st.error(
-        "Deployment is missing the local app package. Upload or commit the full `app/` folder "
-        "alongside `streamlit_app.py`, then reboot the Streamlit app."
-    )
-    st.stop()
+USING_EMBEDDED_FALLBACK = not (APP_ROOT / "app" / "core" / "analyzer.py").exists()
 
-try:
-    from app.core.analyzer import analyze_stock, prepare_stock, scan_stocks
-    from app.core.backtesting import backtest_portfolio, backtest_signal_strategy
-    from app.core.config import DEFAULT_WATCHLIST, RISK_RULES, SIGNAL_LOG_FILE, TRADE_LOG_FILE
-    from app.core.data import fetch_last_prices, market_data_healthcheck, normalize_tickers
-    from app.core.modeling import train_models
-    from app.core.paper_trading import cancel_order, log_signal, open_orders_table, place_paper_order, position_size
-    from app.core.screener import COMMON_UNIVERSE, screen_universe
-    from app.core.watchlists import load_watchlists, parse_uploaded_watchlist, save_watchlist
-except ModuleNotFoundError as exc:
-    st.error(
-        f"Missing Python module `{exc.name}`. On Streamlit Cloud, make sure `requirements.txt` "
-        "is committed and the app has been rebooted after dependency installation."
-    )
-    st.stop()
+if not USING_EMBEDDED_FALLBACK:
+    try:
+        from app.core.analyzer import analyze_stock, prepare_stock, scan_stocks
+        from app.core.backtesting import backtest_portfolio, backtest_signal_strategy
+        from app.core.config import DEFAULT_WATCHLIST, RISK_RULES, SIGNAL_LOG_FILE, TRADE_LOG_FILE
+        from app.core.data import fetch_last_prices, market_data_healthcheck, normalize_tickers
+        from app.core.modeling import train_models
+        from app.core.paper_trading import cancel_order, log_signal, open_orders_table, place_paper_order, position_size
+        from app.core.screener import COMMON_UNIVERSE, screen_universe
+        from app.core.watchlists import load_watchlists, parse_uploaded_watchlist, save_watchlist
+    except ModuleNotFoundError:
+        USING_EMBEDDED_FALLBACK = True
+
+if USING_EMBEDDED_FALLBACK:
+    import json
+    import re
+    from datetime import datetime
+
+    import numpy as np
+    import requests
+    import yfinance as yf
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.metrics import accuracy_score
+    from sklearn.model_selection import TimeSeriesSplit
+    from sklearn.preprocessing import StandardScaler
+
+    try:
+        from alpaca.trading.client import TradingClient
+        from alpaca.trading.enums import OrderSide, QueryOrderStatus, TimeInForce
+        from alpaca.trading.requests import GetOrdersRequest, MarketOrderRequest
+        from alpaca.common.exceptions import APIError
+    except Exception:
+        TradingClient = None
+        OrderSide = None
+        QueryOrderStatus = None
+        TimeInForce = None
+        GetOrdersRequest = None
+        MarketOrderRequest = None
+        APIError = Exception
+
+    DEFAULT_WATCHLIST = [
+        "NVDA", "AMZN", "META", "GOOGL", "PLTR", "MU", "SNDK", "NBIS",
+        "AAPL", "MSFT", "TSLA", "AMD", "AVGO", "SMCI", "NFLX", "ARM",
+        "TSM", "ORCL", "CRM", "QCOM", "INTC", "COIN", "MSTR", "SOFI",
+        "HOOD", "JPM", "BAC", "XOM", "NEE", "ENPH", "FSLR",
+    ]
+    RISK_RULES = {
+        "max_risk_per_trade": 0.02,
+        "max_exposure_per_stock": 0.20,
+        "max_total_exposure": 0.80,
+        "min_reward_to_risk": 2.0,
+    }
+    SIGNAL_LOG_FILE = APP_ROOT / "logs" / "signals.csv"
+    TRADE_LOG_FILE = APP_ROOT / "logs" / "paper_trades.csv"
+    WATCHLIST_FILE = APP_ROOT / "custom_watchlists.json"
+    COMMON_UNIVERSE = sorted(set(DEFAULT_WATCHLIST + [
+        "ABBV", "ABNB", "ADBE", "AMAT", "BA", "CAT", "COST", "CVX", "DIS",
+        "GE", "GS", "HD", "IBM", "LLY", "MA", "MRVL", "NOW", "PANW", "PEP",
+        "PYPL", "SHOP", "SNOW", "UBER", "UNH", "V", "WFC", "WMT",
+    ]))
+
+    def normalize_ticker(ticker: str) -> str:
+        return re.sub(r"[^A-Za-z0-9.\-]", "", str(ticker).upper().strip())[:12]
+
+    def normalize_tickers(tickers) -> list[str]:
+        seen = set()
+        output = []
+        for ticker in tickers:
+            clean = normalize_ticker(ticker)
+            if clean and clean not in seen:
+                seen.add(clean)
+                output.append(clean)
+        return output
+
+    @st.cache_data(ttl=300, show_spinner=False)
+    def _yahoo_chart(ticker: str, period: str = "2y", interval: str = "1d") -> pd.DataFrame:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+        response = requests.get(
+            url,
+            params={"range": period, "interval": interval, "includePrePost": "false"},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=20,
+        )
+        response.raise_for_status()
+        result = (response.json().get("chart", {}).get("result") or [None])[0]
+        if not result:
+            return pd.DataFrame()
+        timestamps = result.get("timestamp") or []
+        quote = ((result.get("indicators") or {}).get("quote") or [None])[0] or {}
+        adjclose = ((result.get("indicators") or {}).get("adjclose") or [None])[0] or {}
+        if not timestamps or not quote:
+            return pd.DataFrame()
+        frame = pd.DataFrame(
+            {
+                "Open": quote.get("open"),
+                "High": quote.get("high"),
+                "Low": quote.get("low"),
+                "Close": quote.get("close"),
+                "Adj Close": adjclose.get("adjclose", quote.get("close")),
+                "Volume": quote.get("volume"),
+            },
+            index=pd.to_datetime(timestamps, unit="s"),
+        )
+        frame.index = frame.index.tz_localize(None)
+        return frame.dropna(subset=["Open", "High", "Low", "Close", "Volume"])
+
+    @st.cache_data(ttl=300, show_spinner=False)
+    def fetch_history(ticker: str, period: str = "2y", interval: str = "1d") -> pd.DataFrame:
+        ticker = normalize_ticker(ticker)
+        if not ticker:
+            return pd.DataFrame()
+        try:
+            data = _yahoo_chart(ticker, period, interval)
+        except Exception:
+            data = pd.DataFrame()
+        if data.empty:
+            data = yf.download(ticker, period=period, interval=interval, auto_adjust=False, progress=False, threads=False)
+            if isinstance(data.columns, pd.MultiIndex):
+                data.columns = data.columns.get_level_values(0)
+            data = data.rename(columns=str.title)
+        return data.dropna(subset=["Open", "High", "Low", "Close", "Volume"]) if not data.empty else data
+
+    def market_data_healthcheck() -> str:
+        return "ok" if not fetch_history("AAPL", "5d").empty else "Market data provider returned no data. Check internet access or Yahoo Finance availability."
+
+    def fetch_last_prices(tickers) -> pd.DataFrame:
+        rows = []
+        for ticker in normalize_tickers(tickers):
+            hist = fetch_history(ticker)
+            if hist.empty:
+                continue
+            last = hist.iloc[-1]
+            prev = hist["Close"].iloc[-2] if len(hist) > 1 else last["Close"]
+            rows.append({"Ticker": ticker, "Price": float(last["Close"]), "Daily Change %": float((last["Close"] / prev - 1) * 100), "Volume": int(last["Volume"])})
+        return pd.DataFrame(rows)
+
+    def _rsi(close: pd.Series, period: int = 14) -> pd.Series:
+        delta = close.diff()
+        gain = delta.clip(lower=0).rolling(period).mean()
+        loss = -delta.clip(upper=0).rolling(period).mean()
+        rs = gain / loss.replace(0, np.nan)
+        return 100 - (100 / (1 + rs))
+
+    def _atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+        true_range = pd.concat([
+            df["High"] - df["Low"],
+            (df["High"] - df["Close"].shift()).abs(),
+            (df["Low"] - df["Close"].shift()).abs(),
+        ], axis=1).max(axis=1)
+        return true_range.rolling(period).mean()
+
+    def prepare_stock(ticker: str) -> pd.DataFrame:
+        out = fetch_history(ticker).copy()
+        if out.empty:
+            return out
+        out["SMA_20"] = out["Close"].rolling(20).mean()
+        out["SMA_50"] = out["Close"].rolling(50).mean()
+        out["SMA_200"] = out["Close"].rolling(200).mean()
+        out["EMA_9"] = out["Close"].ewm(span=9, adjust=False).mean()
+        out["EMA_20"] = out["Close"].ewm(span=20, adjust=False).mean()
+        out["EMA_50"] = out["Close"].ewm(span=50, adjust=False).mean()
+        out["RSI"] = _rsi(out["Close"])
+        ema_12 = out["Close"].ewm(span=12, adjust=False).mean()
+        ema_26 = out["Close"].ewm(span=26, adjust=False).mean()
+        out["MACD"] = ema_12 - ema_26
+        out["MACD_Signal"] = out["MACD"].ewm(span=9, adjust=False).mean()
+        out["MACD_Hist"] = out["MACD"] - out["MACD_Signal"]
+        out["BB_Mid"] = out["Close"].rolling(20).mean()
+        bb_std = out["Close"].rolling(20).std()
+        out["BB_Upper"] = out["BB_Mid"] + 2 * bb_std
+        out["BB_Lower"] = out["BB_Mid"] - 2 * bb_std
+        out["ATR"] = _atr(out)
+        out["ATR_Pct"] = out["ATR"] / out["Close"] * 100
+        typical = (out["High"] + out["Low"] + out["Close"]) / 3
+        out["VWAP"] = (typical * out["Volume"]).cumsum() / out["Volume"].replace(0, np.nan).cumsum()
+        out["Avg_Volume_20"] = out["Volume"].rolling(20).mean()
+        out["Volume_Ratio"] = out["Volume"] / out["Avg_Volume_20"]
+        out["Dollar_Volume_20"] = (out["Close"] * out["Volume"]).rolling(20).mean()
+        out["Momentum_1D"] = out["Close"].pct_change(1)
+        out["Momentum_5D"] = out["Close"].pct_change(5)
+        out["Momentum_20D"] = out["Close"].pct_change(20)
+        out["Volatility_20D"] = out["Close"].pct_change().rolling(20).std() * np.sqrt(252)
+        out["Gap_Pct"] = (out["Open"] / out["Close"].shift(1) - 1) * 100
+        for ref in ["SPY", "QQQ"]:
+            ref_hist = fetch_history(ref)
+            aligned = ref_hist["Close"].reindex(out.index).ffill() if not ref_hist.empty else pd.Series(index=out.index, dtype=float)
+            out[f"RS_{ref}_20D"] = out["Close"].pct_change(20) - aligned.pct_change(20)
+        return out
+
+    def _suitability(df: pd.DataFrame, allow_penny_stocks: bool = False) -> dict:
+        if df.empty:
+            return {"Suitable": False, "Score": 0, "Reasons": ["No market data available"]}
+        row = df.dropna().iloc[-1] if not df.dropna().empty else df.iloc[-1]
+        checks = {
+            "Average daily volume > 1M": df["Volume"].tail(20).mean() > 1_000_000,
+            "Price above $5": row["Close"] > 5 or allow_penny_stocks,
+            "ATR percentage > 1.5%": row.get("ATR_Pct", 0) > 1.5,
+            "20-day dollar volume > $50M": (df["Close"] * df["Volume"]).tail(20).mean() > 50_000_000,
+            "Minimum 1 year history": len(df) >= 252,
+        }
+        return {"Suitable": all(checks.values()), "Score": round(sum(checks.values()) / len(checks) * 100), "Reasons": [k for k, v in checks.items() if not v] or ["Passes all suitability filters"]}
+
+    def _ai_prob(row: pd.Series) -> dict:
+        bullish_checks = [
+            row["Close"] > row["VWAP"], row["Close"] > row["EMA_20"], row["EMA_20"] > row["EMA_50"],
+            45 <= row["RSI"] <= 70, row["MACD"] > row["MACD_Signal"], row["Volume_Ratio"] > 1,
+            row["ATR_Pct"] > 1.5, row.get("RS_SPY_20D", 0) > 0,
+        ]
+        bearish_checks = [
+            row["Close"] < row["VWAP"], row["Close"] < row["EMA_20"], row["RSI"] < 40 or row["RSI"] > 75,
+            row["MACD"] < row["MACD_Signal"], row["Volume_Ratio"] < 0.8,
+        ]
+        return {"bullish_probability": round(min(92, 30 + sum(bullish_checks) * 7.5), 1), "bearish_probability": round(min(90, 25 + sum(bearish_checks) * 11), 1), "confidence": "Medium"}
+
+    def _risk(row: pd.Series) -> dict:
+        atr = float(row.get("ATR", 0) or 0)
+        close = float(row["Close"])
+        stop = max(0.01, close - 1.5 * atr)
+        target = close + 3.0 * atr
+        return {"buy_zone": close, "stop_loss": stop, "take_profit": target, "risk_reward_ratio": (target - close) / max(0.01, close - stop)}
+
+    def analyze_stock(ticker: str, allow_penny_stocks: bool = False) -> dict:
+        ticker = normalize_ticker(ticker)
+        df = prepare_stock(ticker)
+        if df.empty:
+            return {"Ticker": ticker, "Error": "No data found"}
+        row = df.dropna().iloc[-1]
+        suitability = _suitability(df, allow_penny_stocks)
+        ai = _ai_prob(row)
+        risk = _risk(row)
+        buy_rules = [
+            suitability["Suitable"], ai["bullish_probability"] > 60, row["Close"] > row["VWAP"],
+            row["Close"] > row["EMA_20"], row["EMA_20"] > row["EMA_50"], 45 <= row["RSI"] <= 70,
+            row["MACD"] > row["MACD_Signal"], row["Volume"] > row["Avg_Volume_20"],
+            row["ATR_Pct"] > 1.5, risk["risk_reward_ratio"] >= 2,
+        ]
+        sell_rules = [
+            ai["bearish_probability"] > 60, row["Close"] < row["VWAP"], row["Close"] < row["EMA_20"],
+            row["RSI"] < 40 or row["RSI"] > 75, row["MACD"] < row["MACD_Signal"], row["Volume_Ratio"] < 0.8,
+            not suitability["Suitable"], risk["risk_reward_ratio"] < 2,
+        ]
+        final = "Avoid" if not suitability["Suitable"] else "Strong Buy" if sum(buy_rules) >= 9 else "Buy" if sum(buy_rules) >= 7 else "Sell" if sum(sell_rules) >= 5 else "Hold"
+        return {
+            "Ticker": ticker, "Price": float(row["Close"]), "Daily Change %": float(row["Close"] / df["Close"].iloc[-2] - 1) * 100,
+            "Volume": int(row["Volume"]), "RSI": float(row["RSI"]), "MACD signal": "Bullish" if row["MACD"] > row["MACD_Signal"] else "Bearish",
+            "VWAP status": "Above VWAP" if row["Close"] > row["VWAP"] else "Below VWAP",
+            "Trend": "Uptrend" if row["EMA_20"] > row["EMA_50"] and row["Close"] > row["EMA_20"] else "Downtrend" if row["Close"] < row["EMA_20"] else "Sideways",
+            "AI bullish probability": ai["bullish_probability"], "AI bearish probability": ai["bearish_probability"],
+            "Buy zone": risk["buy_zone"], "Stop loss": risk["stop_loss"], "Take profit": risk["take_profit"], "Risk-reward ratio": risk["risk_reward_ratio"],
+            "Suitability score": suitability["Score"], "Suitability": "Suitable" if suitability["Suitable"] else "Not Suitable",
+            "Suitability reasons": "; ".join(suitability["Reasons"]), "Final signal": final,
+            "Data": df, "Suitability detail": suitability, "AI detail": ai,
+        }
+
+    def scan_stocks(tickers: list[str], limit: int, allow_penny_stocks: bool = False) -> pd.DataFrame:
+        rows = []
+        for ticker in tickers[:limit]:
+            result = analyze_stock(ticker, allow_penny_stocks)
+            if "Error" not in result:
+                rows.append({key: value for key, value in result.items() if key not in {"Data", "Suitability detail", "AI detail"}})
+        table = pd.DataFrame(rows)
+        if table.empty:
+            return table
+        ranks = {"Strong Buy": 5, "Buy": 4, "Hold": 3, "Sell": 2, "Avoid": 1}
+        table["_rank"] = table["Final signal"].map(ranks)
+        return table.sort_values(["_rank", "Suitability score", "AI bullish probability"], ascending=False).drop(columns="_rank")
+
+    def screen_universe(universe: list[str] | None = None, limit: int = 100, allow_penny_stocks: bool = False) -> pd.DataFrame:
+        result = scan_stocks(universe or COMMON_UNIVERSE, limit, allow_penny_stocks)
+        return result[result["Suitability"] == "Suitable"] if not result.empty else result
+
+    def load_watchlists() -> dict[str, list[str]]:
+        if "watchlists" not in st.session_state:
+            st.session_state.watchlists = {"Default": DEFAULT_WATCHLIST}
+        return st.session_state.watchlists
+
+    def save_watchlist(name: str, tickers: list[str]) -> None:
+        st.session_state.watchlists = load_watchlists()
+        st.session_state.watchlists[name.strip() or "Custom"] = normalize_tickers(tickers)
+        try:
+            WATCHLIST_FILE.write_text(json.dumps(st.session_state.watchlists, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def parse_uploaded_watchlist(file) -> list[str]:
+        df = pd.read_csv(file)
+        column = next((col for col in df.columns if col.lower() in {"ticker", "symbol", "tickers", "symbols"}), df.columns[0])
+        return normalize_tickers(df[column].dropna().astype(str).tolist())
+
+    def backtest_signal_strategy(df: pd.DataFrame, transaction_cost: float = 0.001, slippage: float = 0.001) -> dict:
+        data = df.dropna().copy()
+        if len(data) < 80:
+            return {"error": "Not enough clean history for backtest."}
+        position = ((data["Close"] > data["VWAP"]) & (data["Close"] > data["EMA_20"]) & (data["EMA_20"] > data["EMA_50"]) & data["RSI"].between(45, 70) & (data["MACD"] > data["MACD_Signal"]) & (data["Volume_Ratio"] > 1)).astype(float)
+        returns = position.shift(1).fillna(0) * data["Close"].pct_change().fillna(0) - position.diff().abs().fillna(0) * (transaction_cost + slippage)
+        equity = (1 + returns).cumprod()
+        drawdown = equity / equity.cummax() - 1
+        trade_returns = returns[position.diff().abs() > 0].tolist()
+        wins = [x for x in trade_returns if x > 0]
+        losses = [x for x in trade_returns if x <= 0]
+        return {"total_return": float(equity.iloc[-1] - 1), "win_rate": float(len(wins) / len(trade_returns)) if trade_returns else 0, "sharpe_ratio": float(np.sqrt(252) * returns.mean() / returns.std()) if returns.std() else 0, "max_drawdown": float(drawdown.min()), "profit_factor": float(sum(wins) / abs(sum(losses))) if losses and sum(losses) != 0 else 0, "average_gain": float(np.mean(wins)) if wins else 0, "average_loss": float(np.mean(losses)) if losses else 0, "number_of_trades": int(position.diff().abs().sum() / 2), "equity_curve": equity, "drawdown_curve": drawdown}
+
+    def backtest_portfolio(stock_frames: dict[str, pd.DataFrame], transaction_cost: float, slippage: float) -> dict:
+        curves = {}
+        stats = {}
+        for ticker, frame in stock_frames.items():
+            result = backtest_signal_strategy(frame, transaction_cost, slippage)
+            if "error" not in result:
+                curves[ticker] = result["equity_curve"]
+                stats[ticker] = result
+        if not curves:
+            return {"error": "No symbols had enough data for portfolio backtest."}
+        returns = pd.concat(curves, axis=1).pct_change().mean(axis=1).fillna(0)
+        equity = (1 + returns).cumprod()
+        drawdown = equity / equity.cummax() - 1
+        return {"total_return": float(equity.iloc[-1] - 1), "sharpe_ratio": float(np.sqrt(252) * returns.mean() / returns.std()) if returns.std() else 0, "max_drawdown": float(drawdown.min()), "equity_curve": equity, "drawdown_curve": drawdown, "per_stock": stats}
+
+    FEATURE_COLUMNS = ["Open", "High", "Low", "Close", "Volume", "SMA_20", "SMA_50", "SMA_200", "EMA_9", "EMA_20", "EMA_50", "RSI", "MACD", "MACD_Signal", "MACD_Hist", "BB_Upper", "BB_Lower", "ATR", "ATR_Pct", "VWAP", "Volume_Ratio", "Momentum_1D", "Momentum_5D", "Momentum_20D", "Volatility_20D", "Gap_Pct", "RS_SPY_20D", "RS_QQQ_20D"]
+
+    def train_models(df: pd.DataFrame) -> dict:
+        data = df.copy()
+        data["Future_Return_5D"] = data["Close"].shift(-5) / data["Close"] - 1
+        data["Label"] = np.select([data["Future_Return_5D"] > 0.015, data["Future_Return_5D"] < -0.015], [1, -1], default=0)
+        data = data.dropna(subset=[*FEATURE_COLUMNS, "Label"])
+        if len(data) < 260:
+            return {"error": "Not enough clean rows for time-series training."}
+        x = data[FEATURE_COLUMNS]
+        y = data["Label"]
+        scaler = StandardScaler()
+        x_scaled = scaler.fit_transform(x)
+        model = RandomForestClassifier(n_estimators=200, max_depth=7, random_state=42, class_weight="balanced")
+        scores = []
+        for train_idx, test_idx in TimeSeriesSplit(n_splits=5).split(x_scaled):
+            model.fit(x_scaled[train_idx], y.iloc[train_idx])
+            scores.append(accuracy_score(y.iloc[test_idx], model.predict(x_scaled[test_idx])))
+        model.fit(x_scaled, y)
+        return {"models": {"Random Forest": {"model": model, "cv_accuracy": float(np.mean(scores))}}, "scaler": scaler, "features": FEATURE_COLUMNS, "rows": len(data)}
+
+    def _secret(name: str, default: str = "") -> str:
+        try:
+            return st.secrets.get(name, os.getenv(name, default))
+        except Exception:
+            return os.getenv(name, default)
+
+    def alpaca_client():
+        if TradingClient is None:
+            return None
+        key = _secret("ALPACA_API_KEY")
+        secret = _secret("ALPACA_SECRET_KEY")
+        endpoint = _secret("ALPACA_ENDPOINT", "https://paper-api.alpaca.markets/v2").removesuffix("/").removesuffix("/v2")
+        return TradingClient(key, secret, paper=True, url_override=endpoint) if key and secret else None
+
+    def open_orders_table(ticker: str | None = None) -> pd.DataFrame:
+        client = alpaca_client()
+        if client is None or GetOrdersRequest is None:
+            return pd.DataFrame()
+        request = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[ticker] if ticker else None)
+        return pd.DataFrame([{"id": str(order.id), "symbol": order.symbol, "side": str(order.side).replace("OrderSide.", "").lower(), "qty": order.qty, "type": str(order.type).replace("OrderType.", "").lower(), "status": str(order.status).replace("OrderStatus.", "").lower(), "submitted_at": order.submitted_at} for order in client.get_orders(filter=request)])
+
+    def cancel_order(order_id: str) -> dict:
+        client = alpaca_client()
+        if client is None:
+            return {"ok": False, "message": "Alpaca paper API is not configured."}
+        try:
+            client.cancel_order_by_id(order_id)
+            return {"ok": True, "message": f"Canceled paper order {order_id}."}
+        except APIError as exc:
+            return {"ok": False, "message": f"Could not cancel order: {exc}"}
+
+    def position_size(capital: float, entry: float, stop: float, current_exposure: float = 0) -> int:
+        shares_by_risk = int((capital * RISK_RULES["max_risk_per_trade"]) / max(0.01, entry - stop))
+        shares_by_exposure = int((capital * RISK_RULES["max_exposure_per_stock"] - current_exposure) / entry)
+        return max(0, min(shares_by_risk, shares_by_exposure))
+
+    def place_paper_order(ticker: str, qty: int, side: str = "buy") -> dict:
+        client = alpaca_client()
+        if client is None:
+            return {"ok": False, "message": "Alpaca paper API is not configured."}
+        if qty <= 0:
+            return {"ok": False, "message": "Quantity is zero after risk controls."}
+        opposite = "sell" if side.lower() == "buy" else "buy"
+        open_orders = open_orders_table(ticker)
+        blockers = open_orders[open_orders["side"].astype(str).str.contains(opposite, case=False, na=False)] if not open_orders.empty else pd.DataFrame()
+        if not blockers.empty:
+            return {"ok": False, "message": f"Open opposite-side paper order exists: {', '.join(blockers['id'].astype(str))}. Cancel it before submitting."}
+        try:
+            order = MarketOrderRequest(symbol=ticker, qty=qty, side=OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL, time_in_force=TimeInForce.DAY)
+            submitted = client.submit_order(order)
+            return {"ok": True, "message": f"Submitted paper {side} order for {qty} {ticker}. Alpaca id: {submitted.id}"}
+        except APIError as exc:
+            return {"ok": False, "message": f"Alpaca rejected the paper order: {exc}"}
+
+    def log_signal(row: dict) -> None:
+        try:
+            SIGNAL_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame([{**{"timestamp": datetime.utcnow().isoformat()}, **row}]).to_csv(SIGNAL_LOG_FILE, mode="a", header=not SIGNAL_LOG_FILE.exists(), index=False)
+        except Exception:
+            pass
 
 load_dotenv()
 
