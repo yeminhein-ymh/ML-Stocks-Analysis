@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.py[cod]
+.streamlit/secrets.toml
+logs/*.csv
+app/storage/custom_watchlists.json
+.venv/
+venv/
