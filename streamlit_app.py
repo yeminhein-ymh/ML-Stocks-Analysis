@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -435,6 +436,8 @@ if USING_EMBEDDED_FALLBACK:
 
 load_dotenv()
 
+DAILY_ANALYSIS_FILE = APP_ROOT / "logs" / "daily_signal_analysis.csv"
+
 
 def inject_style() -> None:
     st.markdown(
@@ -483,6 +486,105 @@ def scanner_universe(selected: list[str], limit: int) -> list[str]:
     return universe[:limit]
 
 
+def signal_direction(signal: str) -> str:
+    signal = str(signal)
+    if signal in {"Strong Buy", "Buy"}:
+        return "Bullish"
+    if signal in {"Sell", "Avoid"}:
+        return "Bearish"
+    return "Neutral"
+
+
+def record_daily_rows(rows: pd.DataFrame, source: str) -> int:
+    if rows.empty:
+        return 0
+    DAILY_ANALYSIS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    today = pd.Timestamp.now().date().isoformat()
+    records = rows.copy()
+    records["Record date"] = today
+    records["Recorded at"] = datetime.utcnow().isoformat()
+    records["Source"] = source
+    records["Signal direction"] = records["Final signal"].map(signal_direction)
+    records = records.rename(columns={"Price": "Entry price"})
+    keep_cols = [
+        "Record date", "Recorded at", "Source", "Ticker", "Entry price", "Daily Change %",
+        "Volume", "RSI", "MACD signal", "VWAP status", "Trend", "AI bullish probability",
+        "AI bearish probability", "Buy zone", "Stop loss", "Take profit", "Risk-reward ratio",
+        "Suitability score", "Suitability", "Suitability reasons", "Final signal", "Signal direction",
+    ]
+    for col in keep_cols:
+        if col not in records.columns:
+            records[col] = None
+    records = records[keep_cols]
+    if DAILY_ANALYSIS_FILE.exists():
+        existing = pd.read_csv(DAILY_ANALYSIS_FILE)
+        existing = existing[
+            ~(
+                (existing["Record date"].astype(str) == today)
+                & (existing["Source"].astype(str) == source)
+                & (existing["Ticker"].astype(str).isin(records["Ticker"].astype(str)))
+            )
+        ]
+        records = pd.concat([existing, records], ignore_index=True)
+    records.to_csv(DAILY_ANALYSIS_FILE, index=False)
+    return len(rows)
+
+
+def load_daily_records() -> pd.DataFrame:
+    if not DAILY_ANALYSIS_FILE.exists():
+        return pd.DataFrame()
+    return pd.read_csv(DAILY_ANALYSIS_FILE)
+
+
+def evaluate_signal_records(records: pd.DataFrame, horizon_days: int = 5, threshold_pct: float = 1.5) -> pd.DataFrame:
+    if records.empty:
+        return records
+    output = records.copy()
+    output["Record date"] = pd.to_datetime(output["Record date"], errors="coerce")
+    output["Entry price"] = pd.to_numeric(output["Entry price"], errors="coerce")
+    rows = []
+    today = pd.Timestamp.now().normalize()
+    for _, row in output.iterrows():
+        ticker = str(row.get("Ticker", "")).strip()
+        record_date = row.get("Record date")
+        entry = row.get("Entry price")
+        if not ticker or pd.isna(record_date) or pd.isna(entry):
+            rows.append({**row.to_dict(), "Evaluation status": "Invalid", "Correct": None})
+            continue
+        age_days = int((today - pd.Timestamp(record_date).normalize()).days)
+        if age_days < horizon_days:
+            rows.append({**row.to_dict(), "Evaluation status": "Waiting", "Days since signal": age_days, "Correct": None})
+            continue
+        hist = fetch_history(ticker, period="1y")
+        if hist.empty:
+            rows.append({**row.to_dict(), "Evaluation status": "No price data", "Days since signal": age_days, "Correct": None})
+            continue
+        future_prices = hist[hist.index >= pd.Timestamp(record_date)]
+        if len(future_prices) <= horizon_days:
+            rows.append({**row.to_dict(), "Evaluation status": "Waiting", "Days since signal": age_days, "Correct": None})
+            continue
+        exit_price = float(future_prices["Close"].iloc[min(horizon_days, len(future_prices) - 1)])
+        realized = (exit_price / float(entry) - 1) * 100
+        direction = signal_direction(row.get("Final signal", "Hold"))
+        if direction == "Bullish":
+            correct = realized >= threshold_pct
+        elif direction == "Bearish":
+            correct = realized <= -threshold_pct
+        else:
+            correct = abs(realized) < threshold_pct
+        rows.append(
+            {
+                **row.to_dict(),
+                "Evaluation status": "Evaluated",
+                "Days since signal": age_days,
+                "Exit price": exit_price,
+                "Realized return %": realized,
+                "Correct": bool(correct),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def format_scan_table(df: pd.DataFrame) -> pd.io.formats.style.Styler:
     numeric_cols = {
         "Price": "${:.2f}",
@@ -528,6 +630,7 @@ def page_multi_stock_scanner(selected: list[str], allow_penny: bool) -> pd.DataF
     scan_size = st.select_slider("Scan size", options=[5, 10, 20, 50, 100], value=50)
     universe = scanner_universe(selected, scan_size)
     st.caption(f"Ready to scan {len(universe)} stocks. Selected symbols are prioritized, then the built-in liquid-stock universe fills the rest.")
+    record_run = st.checkbox("Record this scanner run for signal accuracy analysis", value=True)
     run = st.button("Run scanner", type="primary")
     if not run:
         st.info("Choose a scan size and run the scanner.")
@@ -538,6 +641,9 @@ def page_multi_stock_scanner(selected: list[str], allow_penny: bool) -> pd.DataF
         st.warning("No scan results were available.")
         return table
     st.dataframe(format_scan_table(table), use_container_width=True, hide_index=True)
+    if record_run:
+        saved = record_daily_rows(table, "Multi-Stock AI Scanner")
+        st.success(f"Recorded {saved} scanner signal(s) for today's analysis journal.")
     st.download_button("Download scanner results", table.to_csv(index=False), "scanner_results.csv", "text/csv")
     return table
 
@@ -565,7 +671,11 @@ def page_individual_analysis(selected: list[str], allow_penny: bool) -> None:
 def page_technical_dashboard(selected: list[str]) -> None:
     st.header("Technical Indicator Dashboard")
     ticker = st.selectbox("Technical ticker", selected or DEFAULT_WATCHLIST)
-    df = prepare_stock(ticker).dropna()
+    analysis = analyze_stock(ticker)
+    if "Error" in analysis:
+        st.warning(analysis["Error"])
+        return
+    df = analysis["Data"].dropna()
     if df.empty:
         st.warning("No technical data available.")
         return
@@ -582,6 +692,10 @@ def page_technical_dashboard(selected: list[str]) -> None:
     fig.update_layout(height=260, margin=dict(l=10, r=10, t=25, b=10))
     st.plotly_chart(fig, use_container_width=True)
     st.dataframe(df.tail(60), use_container_width=True)
+    if st.button("Record today's technical snapshot"):
+        row = pd.DataFrame([{key: value for key, value in analysis.items() if key not in {"Data", "Suitability detail", "AI detail"}}])
+        saved = record_daily_rows(row, "Technical Indicator Dashboard")
+        st.success(f"Recorded {saved} technical snapshot for {ticker}.")
 
 
 def page_ai_prediction(selected: list[str]) -> None:
@@ -724,6 +838,53 @@ def page_watchlist_manager(selected: list[str]) -> None:
         st.dataframe(format_scan_table(result), use_container_width=True, hide_index=True)
 
 
+def page_signal_accuracy_analysis() -> None:
+    st.header("Signal Accuracy Analysis")
+    st.caption("This page grades recorded scanner and technical signals after the selected holding period.")
+    records = load_daily_records()
+    if records.empty:
+        st.info("No daily records yet. Run the Multi-Stock AI Scanner with recording enabled or record a Technical Indicator Dashboard snapshot.")
+        return
+    horizon = st.selectbox("Evaluation holding period", [1, 5, 10, 20], index=1)
+    threshold = st.number_input("Correctness threshold (%)", min_value=0.1, max_value=20.0, value=1.5, step=0.1)
+    with st.spinner("Evaluating recorded signals against later prices..."):
+        evaluated = evaluate_signal_records(records, horizon_days=horizon, threshold_pct=threshold)
+    evaluated_done = evaluated[evaluated["Evaluation status"] == "Evaluated"].copy()
+    waiting = evaluated[evaluated["Evaluation status"] == "Waiting"].copy()
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Recorded signals", len(evaluated))
+    c2.metric("Evaluated", len(evaluated_done))
+    c3.metric("Waiting", len(waiting))
+    accuracy = evaluated_done["Correct"].mean() if not evaluated_done.empty else 0
+    c4.metric("Correct final signals", f"{accuracy:.1%}")
+    if not evaluated_done.empty:
+        by_signal = (
+            evaluated_done.groupby("Final signal")
+            .agg(Signals=("Ticker", "count"), Correct=("Correct", "sum"), Accuracy=("Correct", "mean"), Avg_Return=("Realized return %", "mean"))
+            .reset_index()
+            .sort_values("Accuracy", ascending=False)
+        )
+        st.subheader("Accuracy by Final Signal")
+        st.dataframe(by_signal.style.format({"Accuracy": "{:.1%}", "Avg_Return": "{:.2f}%"}), use_container_width=True, hide_index=True)
+        by_source = (
+            evaluated_done.groupby("Source")
+            .agg(Signals=("Ticker", "count"), Accuracy=("Correct", "mean"), Avg_Return=("Realized return %", "mean"))
+            .reset_index()
+        )
+        st.subheader("Accuracy by Source")
+        st.dataframe(by_source.style.format({"Accuracy": "{:.1%}", "Avg_Return": "{:.2f}%"}), use_container_width=True, hide_index=True)
+    st.subheader("Recorded Signal Journal")
+    show_cols = [
+        "Record date", "Source", "Ticker", "Entry price", "Final signal", "Signal direction",
+        "Evaluation status", "Exit price", "Realized return %", "Correct", "RSI",
+        "MACD signal", "VWAP status", "Trend", "AI bullish probability", "AI bearish probability",
+        "Suitability score",
+    ]
+    show_cols = [col for col in show_cols if col in evaluated.columns]
+    st.dataframe(evaluated[show_cols], use_container_width=True, hide_index=True)
+    st.download_button("Download signal journal", evaluated.to_csv(index=False), "daily_signal_analysis.csv", "text/csv")
+
+
 def main() -> None:
     inject_style()
     st.title("Universal AI Stock Analysis Dashboard")
@@ -738,6 +899,7 @@ def main() -> None:
             "Technical Indicator Dashboard",
             "AI Prediction Model",
             "Backtesting",
+            "Signal Accuracy Analysis",
             "Paper Trading Bot",
             "Risk Management",
             "Portfolio Allocation",
@@ -760,6 +922,8 @@ def main() -> None:
         page_ai_prediction(selected)
     elif page == "Backtesting":
         page_backtesting(selected)
+    elif page == "Signal Accuracy Analysis":
+        page_signal_accuracy_analysis()
     elif page == "Paper Trading Bot":
         page_paper_trading(selected, allow_penny)
     elif page == "Risk Management":

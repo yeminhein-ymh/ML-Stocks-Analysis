@@ -9,6 +9,8 @@ Streamlit dashboard and paper-trading bot for universal multi-stock analysis acr
 - Default watchlist: NVDA, AMZN, META, GOOGL, PLTR, MU, SNDK, NBIS, AAPL, MSFT, TSLA, AMD, AVGO, SMCI, NFLX, ARM, TSM, ORCL, CRM, QCOM, INTC, COIN, MSTR, SOFI, HOOD, JPM, BAC, XOM, NEE, ENPH, FSLR.
 - CSV watchlist upload and saved custom watchlists.
 - Stock screener for formula suitability.
+- Daily signal journal for scanner and technical-indicator snapshots.
+- Signal accuracy analysis by final signal after 1, 5, 10, or 20 trading days.
 - Suitability gate before AI signals.
 - Random Forest and optional XGBoost training with time-series splits.
 - Individual and portfolio backtesting with cost and slippage.
@@ -22,10 +24,11 @@ Streamlit dashboard and paper-trading bot for universal multi-stock analysis acr
 4. Technical Indicator Dashboard
 5. AI Prediction Model
 6. Backtesting
-7. Paper Trading Bot
-8. Risk Management
-9. Portfolio Allocation
-10. Watchlist Manager
+7. Signal Accuracy Analysis
+8. Paper Trading Bot
+9. Risk Management
+10. Portfolio Allocation
+11. Watchlist Manager
 
 ## Install
 
