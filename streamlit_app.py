@@ -47,11 +47,6 @@ if USING_EMBEDDED_FALLBACK:
 
     import numpy as np
     import requests
-    import yfinance as yf
-    from sklearn.ensemble import RandomForestClassifier
-    from sklearn.metrics import accuracy_score
-    from sklearn.model_selection import TimeSeriesSplit
-    from sklearn.preprocessing import StandardScaler
 
     try:
         from alpaca.trading.client import TradingClient
@@ -143,10 +138,15 @@ if USING_EMBEDDED_FALLBACK:
         except Exception:
             data = pd.DataFrame()
         if data.empty:
-            data = yf.download(ticker, period=period, interval=interval, auto_adjust=False, progress=False, threads=False)
-            if isinstance(data.columns, pd.MultiIndex):
-                data.columns = data.columns.get_level_values(0)
-            data = data.rename(columns=str.title)
+            try:
+                import yfinance as yf
+
+                data = yf.download(ticker, period=period, interval=interval, auto_adjust=False, progress=False, threads=False)
+                if isinstance(data.columns, pd.MultiIndex):
+                    data.columns = data.columns.get_level_values(0)
+                data = data.rename(columns=str.title)
+            except Exception:
+                data = pd.DataFrame()
         return data.dropna(subset=["Open", "High", "Low", "Close", "Volume"]) if not data.empty else data
 
     def market_data_healthcheck() -> str:
@@ -347,6 +347,13 @@ if USING_EMBEDDED_FALLBACK:
     FEATURE_COLUMNS = ["Open", "High", "Low", "Close", "Volume", "SMA_20", "SMA_50", "SMA_200", "EMA_9", "EMA_20", "EMA_50", "RSI", "MACD", "MACD_Signal", "MACD_Hist", "BB_Upper", "BB_Lower", "ATR", "ATR_Pct", "VWAP", "Volume_Ratio", "Momentum_1D", "Momentum_5D", "Momentum_20D", "Volatility_20D", "Gap_Pct", "RS_SPY_20D", "RS_QQQ_20D"]
 
     def train_models(df: pd.DataFrame) -> dict:
+        try:
+            from sklearn.ensemble import RandomForestClassifier
+            from sklearn.metrics import accuracy_score
+            from sklearn.model_selection import TimeSeriesSplit
+            from sklearn.preprocessing import StandardScaler
+        except Exception:
+            return {"error": "scikit-learn is not installed. Add it to requirements.txt and reboot the app."}
         data = df.copy()
         data["Future_Return_5D"] = data["Close"].shift(-5) / data["Close"] - 1
         data["Label"] = np.select([data["Future_Return_5D"] > 0.015, data["Future_Return_5D"] < -0.015], [1, -1], default=0)

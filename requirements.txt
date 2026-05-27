@@ -5,7 +5,6 @@ numpy>=1.26
 yfinance>=0.2.40
 plotly>=5.22
 scikit-learn>=1.4
-xgboost>=2.0
 python-dotenv>=1.0
 alpaca-py>=0.28
 requests>=2.31
