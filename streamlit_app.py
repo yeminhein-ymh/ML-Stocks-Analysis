@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
+import requests
 import streamlit as st
 from dotenv import load_dotenv
 
@@ -35,7 +36,7 @@ if not USING_EMBEDDED_FALLBACK:
         from app.core.config import DEFAULT_WATCHLIST, RISK_RULES, SIGNAL_LOG_FILE, TRADE_LOG_FILE
         from app.core.data import fetch_last_prices, market_data_healthcheck, normalize_tickers
         from app.core.modeling import train_models
-        from app.core.paper_trading import cancel_order, log_signal, open_orders_table, place_paper_order, position_size
+        from app.core.paper_trading import cancel_order, log_signal, open_orders_table, place_option_paper_order, place_paper_order, position_size
         from app.core.screener import COMMON_UNIVERSE, screen_universe
         from app.core.watchlists import load_watchlists, parse_uploaded_watchlist, save_watchlist
     except ModuleNotFoundError:
@@ -52,7 +53,7 @@ if USING_EMBEDDED_FALLBACK:
     try:
         from alpaca.trading.client import TradingClient
         from alpaca.trading.enums import OrderSide, QueryOrderStatus, TimeInForce
-        from alpaca.trading.requests import GetOrdersRequest, MarketOrderRequest
+        from alpaca.trading.requests import GetOrdersRequest, LimitOrderRequest, MarketOrderRequest
         from alpaca.common.exceptions import APIError
     except Exception:
         TradingClient = None
@@ -60,6 +61,7 @@ if USING_EMBEDDED_FALLBACK:
         QueryOrderStatus = None
         TimeInForce = None
         GetOrdersRequest = None
+        LimitOrderRequest = None
         MarketOrderRequest = None
         APIError = Exception
 
@@ -427,6 +429,32 @@ if USING_EMBEDDED_FALLBACK:
         except APIError as exc:
             return {"ok": False, "message": f"Alpaca rejected the paper order: {exc}"}
 
+    def place_option_paper_order(option_symbol: str, qty: int, limit_price: float, side: str = "buy") -> dict:
+        client = alpaca_client()
+        if client is None:
+            return {"ok": False, "message": "Alpaca paper API is not configured."}
+        if LimitOrderRequest is None:
+            return {"ok": False, "message": "Installed alpaca-py version does not support limit option orders."}
+        if qty <= 0 or limit_price <= 0:
+            return {"ok": False, "message": "Quantity and limit price must be greater than zero."}
+        open_orders = open_orders_table(option_symbol)
+        opposite = "sell" if side.lower() == "buy" else "buy"
+        blockers = open_orders[open_orders["side"].astype(str).str.contains(opposite, case=False, na=False)] if not open_orders.empty else pd.DataFrame()
+        if not blockers.empty:
+            return {"ok": False, "message": f"Open opposite-side option order exists: {', '.join(blockers['id'].astype(str))}. Cancel it before submitting."}
+        try:
+            order = LimitOrderRequest(
+                symbol=option_symbol.strip().upper(),
+                qty=qty,
+                side=OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL,
+                time_in_force=TimeInForce.DAY,
+                limit_price=round(float(limit_price), 2),
+            )
+            submitted = client.submit_order(order)
+            return {"ok": True, "message": f"Submitted paper option {side} limit order for {qty} {option_symbol} at ${limit_price:.2f}. Alpaca id: {submitted.id}"}
+        except APIError as exc:
+            return {"ok": False, "message": f"Alpaca rejected the option paper order: {exc}"}
+
     def log_signal(row: dict) -> None:
         try:
             SIGNAL_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -437,6 +465,23 @@ if USING_EMBEDDED_FALLBACK:
 load_dotenv()
 
 DAILY_ANALYSIS_FILE = APP_ROOT / "logs" / "daily_signal_analysis.csv"
+
+
+def app_secret(name: str, default: str = "") -> str:
+    try:
+        return st.secrets.get(name, os.getenv(name, default))
+    except Exception:
+        return os.getenv(name, default)
+
+
+def alpaca_rest_base() -> str:
+    return app_secret("ALPACA_ENDPOINT", "https://paper-api.alpaca.markets/v2").removesuffix("/")
+
+
+def alpaca_headers() -> dict:
+    key = app_secret("ALPACA_API_KEY")
+    secret = app_secret("ALPACA_SECRET_KEY")
+    return {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
 
 
 def inject_style() -> None:
@@ -585,6 +630,108 @@ def evaluate_signal_records(records: pd.DataFrame, horizon_days: int = 5, thresh
     return pd.DataFrame(rows)
 
 
+def fetch_option_contracts(underlying: str, option_type: str, min_dte: int, max_dte: int, limit: int = 1000) -> pd.DataFrame:
+    if not app_secret("ALPACA_API_KEY") or not app_secret("ALPACA_SECRET_KEY"):
+        return pd.DataFrame()
+    normalized_underlying = normalize_tickers([underlying])[0] if normalize_tickers([underlying]) else ""
+    if not normalized_underlying:
+        return pd.DataFrame()
+    today = datetime.utcnow().date()
+    url = f"{alpaca_rest_base()}/options/contracts"
+    params = {
+        "underlying_symbols": normalized_underlying,
+        "type": option_type.lower(),
+        "status": "active",
+        "expiration_date_gte": (today + timedelta(days=min_dte)).isoformat(),
+        "expiration_date_lte": (today + timedelta(days=max_dte)).isoformat(),
+        "limit": limit,
+    }
+    try:
+        response = requests.get(url, params=params, headers=alpaca_headers(), timeout=20)
+        response.raise_for_status()
+    except Exception:
+        return pd.DataFrame()
+    contracts = response.json().get("option_contracts", [])
+    if not contracts:
+        return pd.DataFrame()
+    rows = []
+    for contract in contracts:
+        rows.append(
+            {
+                "Option Symbol": contract.get("symbol"),
+                "Underlying": contract.get("underlying_symbol") or underlying,
+                "Type": str(contract.get("type", option_type)).title(),
+                "Strike": float(contract.get("strike_price") or 0),
+                "Expiration": contract.get("expiration_date"),
+                "Status": contract.get("status"),
+                "Tradable": contract.get("tradable", True),
+            }
+        )
+    frame = pd.DataFrame(rows)
+    frame["Expiration"] = pd.to_datetime(frame["Expiration"], errors="coerce")
+    frame["DTE"] = (frame["Expiration"].dt.date - today).apply(lambda value: value.days if pd.notna(value) else None)
+    frame = frame.dropna(subset=["Option Symbol", "Strike", "Expiration"])
+    return frame[(frame["Status"].astype(str).str.lower() == "active") & (frame["Tradable"].astype(bool))]
+
+
+def options_signal_from_stock(row: pd.Series) -> str:
+    if row["Final signal"] in {"Strong Buy", "Buy"}:
+        return "call"
+    if row["Final signal"] in {"Sell", "Avoid"}:
+        return "put"
+    return "skip"
+
+
+def build_options_ai_scanner(
+    selected: list[str],
+    scan_size: int,
+    min_dte: int,
+    max_dte: int,
+    max_moneyness_pct: float,
+    allow_penny: bool,
+) -> pd.DataFrame:
+    stock_table = scan_stocks(scanner_universe(selected, scan_size), limit=scan_size, allow_penny_stocks=allow_penny)
+    if stock_table.empty:
+        return pd.DataFrame()
+    rows = []
+    actionable = stock_table[stock_table["Final signal"].isin(["Strong Buy", "Buy", "Sell", "Avoid"])].copy()
+    for _, stock in actionable.iterrows():
+        option_type = options_signal_from_stock(stock)
+        contracts = fetch_option_contracts(stock["Ticker"], option_type, min_dte, max_dte)
+        if contracts.empty:
+            continue
+        price = float(stock["Price"])
+        contracts["Moneyness %"] = (contracts["Strike"] / price - 1) * 100
+        if option_type == "call":
+            candidates = contracts[(contracts["Strike"] >= price * 0.97) & (contracts["Strike"] <= price * (1 + max_moneyness_pct / 100))]
+        else:
+            candidates = contracts[(contracts["Strike"] <= price * 1.03) & (contracts["Strike"] >= price * (1 - max_moneyness_pct / 100))]
+        if candidates.empty:
+            candidates = contracts.iloc[(contracts["Strike"] - price).abs().argsort()].head(3)
+        candidates = candidates.copy()
+        candidates["Underlying Price"] = price
+        candidates["Underlying Signal"] = stock["Final signal"]
+        candidates["AI bullish probability"] = stock["AI bullish probability"]
+        candidates["AI bearish probability"] = stock["AI bearish probability"]
+        candidates["Suitability score"] = stock["Suitability score"]
+        candidates["Risk-reward ratio"] = stock["Risk-reward ratio"]
+        signal_probability = stock["AI bullish probability"] if option_type == "call" else stock["AI bearish probability"]
+        candidates["Options AI score"] = (
+            candidates["Suitability score"]
+            + candidates["Risk-reward ratio"].clip(upper=5) * 8
+            + candidates["DTE"].between(min_dte, max_dte).astype(int) * 10
+            - candidates["Moneyness %"].abs().clip(upper=50) * 0.7
+            + signal_probability * 0.35
+        )
+        candidates["Suggested side"] = "buy"
+        candidates["Estimated max loss"] = "Premium paid x 100 x contracts"
+        rows.append(candidates.sort_values("Options AI score", ascending=False).head(1))
+    if not rows:
+        return pd.DataFrame()
+    result = pd.concat(rows, ignore_index=True)
+    return result.sort_values("Options AI score", ascending=False)
+
+
 def format_scan_table(df: pd.DataFrame) -> pd.io.formats.style.Styler:
     numeric_cols = {
         "Price": "${:.2f}",
@@ -646,6 +793,45 @@ def page_multi_stock_scanner(selected: list[str], allow_penny: bool) -> pd.DataF
         st.success(f"Recorded {saved} scanner signal(s) for today's analysis journal.")
     st.download_button("Download scanner results", table.to_csv(index=False), "scanner_results.csv", "text/csv")
     return table
+
+
+def page_options_ai_scanner(selected: list[str], allow_penny: bool) -> None:
+    st.header("Options AI Scanner")
+    st.warning("Options scanner is for education and Alpaca paper trading only. It does not guarantee fills or profit.")
+    c1, c2, c3, c4 = st.columns(4)
+    scan_size = c1.selectbox("Underlying scan size", [5, 10, 20, 50], index=2)
+    min_dte = c2.number_input("Minimum DTE", min_value=1, max_value=180, value=14, step=1)
+    max_dte = c3.number_input("Maximum DTE", min_value=2, max_value=365, value=45, step=1)
+    max_moneyness = c4.number_input("Max OTM/ITM distance %", min_value=1.0, max_value=50.0, value=8.0, step=0.5)
+    st.caption("The scanner maps bullish stock signals to call candidates and bearish/avoid signals to put candidates, then ranks near-the-money active Alpaca contracts.")
+    if st.button("Run options AI scanner", type="primary"):
+        with st.spinner("Scanning stocks and matching option contracts..."):
+            table = build_options_ai_scanner(selected, scan_size, int(min_dte), int(max_dte), float(max_moneyness), allow_penny)
+        if table.empty:
+            st.warning("No option candidates found. Check Alpaca credentials/secrets, option permissions, or widen the DTE/moneyness filters.")
+            return
+        st.session_state["last_options_scan"] = table
+        display_cols = [
+            "Option Symbol", "Underlying", "Underlying Price", "Type", "Strike", "Expiration", "DTE",
+            "Moneyness %", "Underlying Signal", "AI bullish probability", "AI bearish probability",
+            "Suitability score", "Risk-reward ratio", "Options AI score", "Suggested side",
+        ]
+        st.dataframe(
+            table[display_cols].style.format(
+                {
+                    "Underlying Price": "${:.2f}",
+                    "Strike": "${:.2f}",
+                    "Moneyness %": "{:.2f}%",
+                    "AI bullish probability": "{:.1f}%",
+                    "AI bearish probability": "{:.1f}%",
+                    "Risk-reward ratio": "{:.2f}",
+                    "Options AI score": "{:.1f}",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.download_button("Download option candidates", table.to_csv(index=False), "options_ai_scanner.csv", "text/csv")
 
 
 def page_individual_analysis(selected: list[str], allow_penny: bool) -> None:
@@ -784,6 +970,43 @@ def page_paper_trading(selected: list[str], allow_penny: bool) -> None:
         st.dataframe(pd.read_csv(SIGNAL_LOG_FILE).tail(100), use_container_width=True)
 
 
+def page_options_paper_trading() -> None:
+    st.header("Options Paper Trading")
+    st.warning("Paper options only. Use limit orders. Options can expire worthless and may be illiquid.")
+    last_scan = st.session_state.get("last_options_scan", pd.DataFrame())
+    scanned_symbols = last_scan["Option Symbol"].dropna().astype(str).tolist() if not last_scan.empty and "Option Symbol" in last_scan else []
+    mode = st.radio("Contract source", ["Use scanner result", "Manual option symbol"], horizontal=True)
+    if mode == "Use scanner result" and scanned_symbols:
+        option_symbol = st.selectbox("Option contract", scanned_symbols)
+        selected_row = last_scan[last_scan["Option Symbol"] == option_symbol].iloc[0]
+        st.dataframe(pd.DataFrame([selected_row]), use_container_width=True, hide_index=True)
+    else:
+        option_symbol = st.text_input("Option symbol", placeholder="Example: AAPL260116C00310000").strip().upper()
+        if mode == "Use scanner result" and not scanned_symbols:
+            st.info("Run the Options AI Scanner first, or switch to manual option symbol.")
+    c1, c2, c3 = st.columns(3)
+    qty = c1.number_input("Contracts", min_value=0, value=0, step=1)
+    limit_price = c2.number_input("Limit price per contract", min_value=0.0, value=0.0, step=0.05, format="%.2f")
+    side = c3.selectbox("Side", ["buy", "sell"])
+    estimated_notional = qty * limit_price * 100
+    st.metric("Estimated premium/notional", f"${estimated_notional:,.2f}")
+    emergency_stop = st.toggle("Emergency stop", value=False, key="options_emergency_stop")
+    if st.button("Submit Alpaca paper option order", type="primary", disabled=emergency_stop or not option_symbol):
+        result = place_option_paper_order(option_symbol, int(qty), float(limit_price), side=side)
+        (st.success if result["ok"] else st.error)(result["message"])
+    st.subheader("Open Option Paper Orders")
+    open_orders = open_orders_table(option_symbol if option_symbol else None)
+    if open_orders.empty:
+        st.caption("No open paper orders for this option symbol.")
+    else:
+        st.dataframe(open_orders, use_container_width=True, hide_index=True)
+        cancel_id = st.selectbox("Cancel option order", open_orders["id"].tolist())
+        if st.button("Cancel selected option order", disabled=emergency_stop):
+            result = cancel_order(cancel_id)
+            (st.success if result["ok"] else st.error)(result["message"])
+            st.rerun()
+
+
 def page_risk_management() -> None:
     st.header("Risk Management")
     st.write("Built-in paper-bot constraints:")
@@ -895,12 +1118,14 @@ def main() -> None:
         [
             "Market Overview",
             "Multi-Stock AI Scanner",
+            "Options AI Scanner",
             "Individual Stock Analysis",
             "Technical Indicator Dashboard",
             "AI Prediction Model",
             "Backtesting",
             "Signal Accuracy Analysis",
             "Paper Trading Bot",
+            "Options Paper Trading",
             "Risk Management",
             "Portfolio Allocation",
             "Watchlist Manager",
@@ -914,6 +1139,8 @@ def main() -> None:
         page_market_overview(selected)
     elif page == "Multi-Stock AI Scanner":
         page_multi_stock_scanner(selected, allow_penny)
+    elif page == "Options AI Scanner":
+        page_options_ai_scanner(selected, allow_penny)
     elif page == "Individual Stock Analysis":
         page_individual_analysis(selected, allow_penny)
     elif page == "Technical Indicator Dashboard":
@@ -926,6 +1153,8 @@ def main() -> None:
         page_signal_accuracy_analysis()
     elif page == "Paper Trading Bot":
         page_paper_trading(selected, allow_penny)
+    elif page == "Options Paper Trading":
+        page_options_paper_trading()
     elif page == "Risk Management":
         page_risk_management()
     elif page == "Portfolio Allocation":

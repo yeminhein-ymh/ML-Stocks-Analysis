@@ -11,6 +11,8 @@ Streamlit dashboard and paper-trading bot for universal multi-stock analysis acr
 - Stock screener for formula suitability.
 - Daily signal journal for scanner and technical-indicator snapshots.
 - Signal accuracy analysis by final signal after 1, 5, 10, or 20 trading days.
+- Options AI Scanner for paper-only single-leg call/put candidates using Alpaca option contracts.
+- Options Paper Trading page for paper limit orders on selected or manually entered option contracts.
 - Suitability gate before AI signals.
 - Random Forest and optional XGBoost training with time-series splits.
 - Individual and portfolio backtesting with cost and slippage.
@@ -20,15 +22,17 @@ Streamlit dashboard and paper-trading bot for universal multi-stock analysis acr
 
 1. Market Overview
 2. Multi-Stock AI Scanner
-3. Individual Stock Analysis
-4. Technical Indicator Dashboard
-5. AI Prediction Model
-6. Backtesting
-7. Signal Accuracy Analysis
-8. Paper Trading Bot
-9. Risk Management
-10. Portfolio Allocation
-11. Watchlist Manager
+3. Options AI Scanner
+4. Individual Stock Analysis
+5. Technical Indicator Dashboard
+6. AI Prediction Model
+7. Backtesting
+8. Signal Accuracy Analysis
+9. Paper Trading Bot
+10. Options Paper Trading
+11. Risk Management
+12. Portfolio Allocation
+13. Watchlist Manager
 
 ## Install
 
@@ -73,6 +77,10 @@ Paper bot risk controls:
 - Maximum total exposure: 80%
 - Minimum reward:risk ratio: 1:2
 - Emergency stop disables scan/order actions in the current session
+
+## Options Paper Trading
+
+Options support is single-leg and paper-only. The options scanner maps bullish stock signals to call candidates and bearish/avoid signals to put candidates, then ranks active tradable contracts by DTE, moneyness, underlying signal strength, suitability, and risk/reward. The order page submits Alpaca paper limit orders only; no live options trading is implemented.
 
 ## Project Structure
 
