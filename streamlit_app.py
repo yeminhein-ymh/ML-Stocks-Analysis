@@ -459,12 +459,13 @@ def disclaimer() -> None:
     )
 
 
-def ticker_selector(max_default: int = 10) -> list[str]:
+def ticker_selector(max_default: int = 50) -> list[str]:
     watchlists = load_watchlists()
     selected_watchlist = st.sidebar.selectbox("Watchlist", list(watchlists.keys()))
     manual = st.sidebar.text_input("Add any US ticker", placeholder="Example: AAPL, MSFT, AMD")
     uploaded = st.sidebar.file_uploader("Upload CSV watchlist", type=["csv"])
     tickers = list(watchlists[selected_watchlist])
+    tickers.extend(COMMON_UNIVERSE)
     if uploaded is not None:
         tickers.extend(parse_uploaded_watchlist(uploaded))
     if manual:
@@ -475,6 +476,11 @@ def ticker_selector(max_default: int = 10) -> list[str]:
         save_watchlist(f"Custom {pd.Timestamp.now().strftime('%Y-%m-%d %H%M')}", selected)
         st.sidebar.success("Watchlist saved.")
     return selected
+
+
+def scanner_universe(selected: list[str], limit: int) -> list[str]:
+    universe = normalize_tickers([*selected, *COMMON_UNIVERSE, *DEFAULT_WATCHLIST])
+    return universe[:limit]
 
 
 def format_scan_table(df: pd.DataFrame) -> pd.io.formats.style.Styler:
@@ -519,13 +525,15 @@ def page_market_overview(selected: list[str]) -> None:
 
 def page_multi_stock_scanner(selected: list[str], allow_penny: bool) -> pd.DataFrame:
     st.header("Multi-Stock AI Scanner")
-    scan_size = st.select_slider("Scan size", options=[5, 10, 20, 50, 100], value=min(20, max(5, len(selected))))
+    scan_size = st.select_slider("Scan size", options=[5, 10, 20, 50, 100], value=50)
+    universe = scanner_universe(selected, scan_size)
+    st.caption(f"Ready to scan {len(universe)} stocks. Selected symbols are prioritized, then the built-in liquid-stock universe fills the rest.")
     run = st.button("Run scanner", type="primary")
     if not run:
-        st.info("Choose up to 100 stocks and run the scanner.")
+        st.info("Choose a scan size and run the scanner.")
         return pd.DataFrame()
     with st.spinner("Scanning selected stocks..."):
-        table = scan_stocks(selected, limit=scan_size, allow_penny_stocks=allow_penny)
+        table = scan_stocks(universe, limit=scan_size, allow_penny_stocks=allow_penny)
     if table.empty:
         st.warning("No scan results were available.")
         return table
@@ -738,7 +746,7 @@ def main() -> None:
     )
 
     if not selected:
-        selected = DEFAULT_WATCHLIST[:10]
+        selected = scanner_universe([], 50)
 
     if page == "Market Overview":
         page_market_overview(selected)
