@@ -594,21 +594,31 @@ def evaluate_signal_records(records: pd.DataFrame, horizon_days: int = 5, thresh
         record_date = row.get("Record date")
         entry = row.get("Entry price")
         if not ticker or pd.isna(record_date) or pd.isna(entry):
-            rows.append({**row.to_dict(), "Evaluation status": "Invalid", "Correct": None})
+            rows.append({**row.to_dict(), "Evaluation status": "Invalid", "Wait reason": "Missing ticker, date, or entry price", "Correct": None})
             continue
-        age_days = int((today - pd.Timestamp(record_date).normalize()).days)
-        if age_days < horizon_days:
-            rows.append({**row.to_dict(), "Evaluation status": "Waiting", "Days since signal": age_days, "Correct": None})
-            continue
+        record_day = pd.Timestamp(record_date).normalize()
+        age_days = int((today - record_day).days)
         hist = fetch_history(ticker, period="1y")
         if hist.empty:
-            rows.append({**row.to_dict(), "Evaluation status": "No price data", "Days since signal": age_days, "Correct": None})
+            rows.append({**row.to_dict(), "Evaluation status": "No price data", "Wait reason": "Could not download price history", "Days since signal": age_days, "Correct": None})
             continue
-        future_prices = hist[hist.index >= pd.Timestamp(record_date)]
-        if len(future_prices) <= horizon_days:
-            rows.append({**row.to_dict(), "Evaluation status": "Waiting", "Days since signal": age_days, "Correct": None})
+        hist = hist.copy()
+        hist["Trade Date"] = pd.to_datetime(hist.index).normalize()
+        future_prices = hist[hist["Trade Date"] >= record_day]
+        available_bars = max(0, len(future_prices) - 1)
+        if available_bars < horizon_days:
+            rows.append(
+                {
+                    **row.to_dict(),
+                    "Evaluation status": "Waiting",
+                    "Wait reason": f"Needs {horizon_days} later trading bar(s); available {available_bars}",
+                    "Days since signal": age_days,
+                    "Trading bars available": available_bars,
+                    "Correct": None,
+                }
+            )
             continue
-        exit_price = float(future_prices["Close"].iloc[min(horizon_days, len(future_prices) - 1)])
+        exit_price = float(future_prices["Close"].iloc[horizon_days])
         realized = (exit_price / float(entry) - 1) * 100
         direction = signal_direction(row.get("Final signal", "Hold"))
         if direction == "Bullish":
@@ -621,7 +631,9 @@ def evaluate_signal_records(records: pd.DataFrame, horizon_days: int = 5, thresh
             {
                 **row.to_dict(),
                 "Evaluation status": "Evaluated",
+                "Wait reason": "",
                 "Days since signal": age_days,
+                "Trading bars available": available_bars,
                 "Exit price": exit_price,
                 "Realized return %": realized,
                 "Correct": bool(correct),
@@ -1099,7 +1111,7 @@ def page_signal_accuracy_analysis() -> None:
     st.subheader("Recorded Signal Journal")
     show_cols = [
         "Record date", "Source", "Ticker", "Entry price", "Final signal", "Signal direction",
-        "Evaluation status", "Exit price", "Realized return %", "Correct", "RSI",
+        "Evaluation status", "Wait reason", "Trading bars available", "Exit price", "Realized return %", "Correct", "RSI",
         "MACD signal", "VWAP status", "Trend", "AI bullish probability", "AI bearish probability",
         "Suitability score",
     ]
