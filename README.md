@@ -84,6 +84,18 @@ Options support is single-leg and paper-only. The options scanner maps bullish s
 
 Buy orders require the option premium times 100 times contracts. Sell put orders require cash-secured collateral based on strike times 100 times contracts, so the app checks available options buying power before submit. Selling uncovered calls is disabled.
 
+The stock paper bot and options pages can use separate Alpaca paper accounts:
+
+```toml
+ALPACA_API_KEY="stock_bot_paper_key"
+ALPACA_SECRET_KEY="stock_bot_paper_secret"
+ALPACA_ENDPOINT="https://paper-api.alpaca.markets/v2"
+
+ALPACA_OPTIONS_API_KEY="options_paper_key"
+ALPACA_OPTIONS_SECRET_KEY="options_paper_secret"
+ALPACA_OPTIONS_ENDPOINT="https://paper-api.alpaca.markets/v2"
+```
+
 ## Project Structure
 
 ```text

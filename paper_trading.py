@@ -24,10 +24,15 @@ except Exception:
     APIError = Exception
 
 
-def alpaca_client():
-    key = os.getenv("ALPACA_API_KEY")
-    secret = os.getenv("ALPACA_SECRET_KEY")
-    paper_endpoint = os.getenv("ALPACA_ENDPOINT", "https://paper-api.alpaca.markets/v2")
+def alpaca_client(account_type: str = "stock"):
+    if account_type == "options":
+        key = os.getenv("ALPACA_OPTIONS_API_KEY") or os.getenv("ALPACA_API_KEY")
+        secret = os.getenv("ALPACA_OPTIONS_SECRET_KEY") or os.getenv("ALPACA_SECRET_KEY")
+        paper_endpoint = os.getenv("ALPACA_OPTIONS_ENDPOINT") or os.getenv("ALPACA_ENDPOINT", "https://paper-api.alpaca.markets/v2")
+    else:
+        key = os.getenv("ALPACA_API_KEY")
+        secret = os.getenv("ALPACA_SECRET_KEY")
+        paper_endpoint = os.getenv("ALPACA_ENDPOINT", "https://paper-api.alpaca.markets/v2")
     if not key or not secret or TradingClient is None:
         return None
     sdk_base_url = paper_endpoint.removesuffix("/").removesuffix("/v2")
@@ -136,6 +141,32 @@ def open_orders_table(ticker: str | None = None) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def open_option_orders_table(ticker: str | None = None) -> pd.DataFrame:
+    return _open_orders_table_for_client(alpaca_client("options"), ticker)
+
+
+def _open_orders_table_for_client(client, ticker: str | None = None) -> pd.DataFrame:
+    if client is None:
+        return pd.DataFrame()
+    if GetOrdersRequest is None:
+        return pd.DataFrame()
+    request = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[ticker] if ticker else None)
+    rows = []
+    for order in client.get_orders(filter=request):
+        rows.append(
+            {
+                "id": str(getattr(order, "id", "")),
+                "symbol": getattr(order, "symbol", ""),
+                "side": str(getattr(order, "side", "")).replace("OrderSide.", "").lower(),
+                "qty": getattr(order, "qty", ""),
+                "type": str(getattr(order, "type", "")).replace("OrderType.", "").lower(),
+                "status": str(getattr(order, "status", "")).replace("OrderStatus.", "").lower(),
+                "submitted_at": getattr(order, "submitted_at", ""),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def cancel_order(order_id: str) -> dict:
     client = alpaca_client()
     if client is None:
@@ -145,6 +176,17 @@ def cancel_order(order_id: str) -> dict:
     except APIError as exc:
         return {"ok": False, "message": f"Could not cancel order: {exc}"}
     return {"ok": True, "message": f"Canceled paper order {order_id}."}
+
+
+def cancel_option_order(order_id: str) -> dict:
+    client = alpaca_client("options")
+    if client is None:
+        return {"ok": False, "message": "Alpaca options paper API is not configured."}
+    try:
+        client.cancel_order_by_id(order_id)
+    except APIError as exc:
+        return {"ok": False, "message": f"Could not cancel option order: {exc}"}
+    return {"ok": True, "message": f"Canceled option paper order {order_id}."}
 
 
 def place_paper_order(ticker: str, qty: int, side: str = "buy") -> dict:
@@ -178,9 +220,9 @@ def place_paper_order(ticker: str, qty: int, side: str = "buy") -> dict:
 
 
 def place_option_paper_order(option_symbol: str, qty: int, limit_price: float, side: str = "buy") -> dict:
-    client = alpaca_client()
+    client = alpaca_client("options")
     if client is None:
-        return {"ok": False, "message": "Alpaca paper API is not configured."}
+        return {"ok": False, "message": "Alpaca options paper API is not configured."}
     if LimitOrderRequest is None:
         return {"ok": False, "message": "Installed alpaca-py version does not support limit order requests."}
     if qty <= 0:

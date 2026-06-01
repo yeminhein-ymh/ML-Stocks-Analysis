@@ -37,7 +37,7 @@ if not USING_EMBEDDED_FALLBACK:
         from app.core.config import DEFAULT_WATCHLIST, RISK_RULES, SIGNAL_LOG_FILE, TRADE_LOG_FILE
         from app.core.data import fetch_last_prices, market_data_healthcheck, normalize_tickers
         from app.core.modeling import train_models
-        from app.core.paper_trading import cancel_order, log_signal, open_orders_table, option_order_requirement, place_option_paper_order, place_paper_order, position_size
+        from app.core.paper_trading import cancel_option_order, cancel_order, log_signal, open_option_orders_table, open_orders_table, option_order_requirement, place_option_paper_order, place_paper_order, position_size
         from app.core.screener import COMMON_UNIVERSE, screen_universe
         from app.core.watchlists import load_watchlists, parse_uploaded_watchlist, save_watchlist
     except ModuleNotFoundError:
@@ -382,16 +382,28 @@ if USING_EMBEDDED_FALLBACK:
         except Exception:
             return os.getenv(name, default)
 
-    def alpaca_client():
+    def alpaca_client(account_type: str = "stock"):
         if TradingClient is None:
             return None
-        key = _secret("ALPACA_API_KEY")
-        secret = _secret("ALPACA_SECRET_KEY")
-        endpoint = _secret("ALPACA_ENDPOINT", "https://paper-api.alpaca.markets/v2").removesuffix("/").removesuffix("/v2")
+        if account_type == "options":
+            key = _secret("ALPACA_OPTIONS_API_KEY") or _secret("ALPACA_API_KEY")
+            secret = _secret("ALPACA_OPTIONS_SECRET_KEY") or _secret("ALPACA_SECRET_KEY")
+            endpoint = (_secret("ALPACA_OPTIONS_ENDPOINT") or _secret("ALPACA_ENDPOINT", "https://paper-api.alpaca.markets/v2")).removesuffix("/").removesuffix("/v2")
+        else:
+            key = _secret("ALPACA_API_KEY")
+            secret = _secret("ALPACA_SECRET_KEY")
+            endpoint = _secret("ALPACA_ENDPOINT", "https://paper-api.alpaca.markets/v2").removesuffix("/").removesuffix("/v2")
         return TradingClient(key, secret, paper=True, url_override=endpoint) if key and secret else None
 
     def open_orders_table(ticker: str | None = None) -> pd.DataFrame:
         client = alpaca_client()
+        return _open_orders_table_for_client(client, ticker)
+
+    def open_option_orders_table(ticker: str | None = None) -> pd.DataFrame:
+        client = alpaca_client("options")
+        return _open_orders_table_for_client(client, ticker)
+
+    def _open_orders_table_for_client(client, ticker: str | None = None) -> pd.DataFrame:
         if client is None or GetOrdersRequest is None:
             return pd.DataFrame()
         request = GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[ticker] if ticker else None)
@@ -406,6 +418,16 @@ if USING_EMBEDDED_FALLBACK:
             return {"ok": True, "message": f"Canceled paper order {order_id}."}
         except APIError as exc:
             return {"ok": False, "message": f"Could not cancel order: {exc}"}
+
+    def cancel_option_order(order_id: str) -> dict:
+        client = alpaca_client("options")
+        if client is None:
+            return {"ok": False, "message": "Alpaca options paper API is not configured."}
+        try:
+            client.cancel_order_by_id(order_id)
+            return {"ok": True, "message": f"Canceled option paper order {order_id}."}
+        except APIError as exc:
+            return {"ok": False, "message": f"Could not cancel option order: {exc}"}
 
     def position_size(capital: float, entry: float, stop: float, current_exposure: float = 0) -> int:
         shares_by_risk = int((capital * RISK_RULES["max_risk_per_trade"]) / max(0.01, entry - stop))
@@ -431,9 +453,9 @@ if USING_EMBEDDED_FALLBACK:
             return {"ok": False, "message": f"Alpaca rejected the paper order: {exc}"}
 
     def place_option_paper_order(option_symbol: str, qty: int, limit_price: float, side: str = "buy") -> dict:
-        client = alpaca_client()
+        client = alpaca_client("options")
         if client is None:
-            return {"ok": False, "message": "Alpaca paper API is not configured."}
+            return {"ok": False, "message": "Alpaca options paper API is not configured."}
         if LimitOrderRequest is None:
             return {"ok": False, "message": "Installed alpaca-py version does not support limit option orders."}
         if qty <= 0 or limit_price <= 0:
@@ -441,7 +463,7 @@ if USING_EMBEDDED_FALLBACK:
         requirement = option_order_requirement(option_symbol, qty, limit_price, side)
         if not requirement["ok"]:
             return {"ok": False, "message": requirement["message"]}
-        available = account_buying_power()
+        available = account_buying_power("options")
         if requirement["required"] > available:
             return {
                 "ok": False,
@@ -451,7 +473,7 @@ if USING_EMBEDDED_FALLBACK:
                     "based on strike x 100 x contracts, not the limit premium."
                 ),
             }
-        open_orders = open_orders_table(option_symbol)
+        open_orders = open_option_orders_table(option_symbol)
         opposite = "sell" if side.lower() == "buy" else "buy"
         blockers = open_orders[open_orders["side"].astype(str).str.contains(opposite, case=False, na=False)] if not open_orders.empty else pd.DataFrame()
         if not blockers.empty:
@@ -488,13 +510,19 @@ def app_secret(name: str, default: str = "") -> str:
         return os.getenv(name, default)
 
 
-def alpaca_rest_base() -> str:
+def alpaca_rest_base(account_type: str = "stock") -> str:
+    if account_type == "options":
+        return (app_secret("ALPACA_OPTIONS_ENDPOINT") or app_secret("ALPACA_ENDPOINT", "https://paper-api.alpaca.markets/v2")).removesuffix("/")
     return app_secret("ALPACA_ENDPOINT", "https://paper-api.alpaca.markets/v2").removesuffix("/")
 
 
-def alpaca_headers() -> dict:
-    key = app_secret("ALPACA_API_KEY")
-    secret = app_secret("ALPACA_SECRET_KEY")
+def alpaca_headers(account_type: str = "stock") -> dict:
+    if account_type == "options":
+        key = app_secret("ALPACA_OPTIONS_API_KEY") or app_secret("ALPACA_API_KEY")
+        secret = app_secret("ALPACA_OPTIONS_SECRET_KEY") or app_secret("ALPACA_SECRET_KEY")
+    else:
+        key = app_secret("ALPACA_API_KEY")
+        secret = app_secret("ALPACA_SECRET_KEY")
     return {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
 
 
@@ -534,11 +562,15 @@ def option_order_requirement(option_symbol: str, qty: int, limit_price: float, s
     }
 
 
-def account_buying_power() -> float:
-    if not app_secret("ALPACA_API_KEY") or not app_secret("ALPACA_SECRET_KEY"):
+def account_buying_power(account_type: str = "stock") -> float:
+    if account_type == "options":
+        has_credentials = bool((app_secret("ALPACA_OPTIONS_API_KEY") or app_secret("ALPACA_API_KEY")) and (app_secret("ALPACA_OPTIONS_SECRET_KEY") or app_secret("ALPACA_SECRET_KEY")))
+    else:
+        has_credentials = bool(app_secret("ALPACA_API_KEY") and app_secret("ALPACA_SECRET_KEY"))
+    if not has_credentials:
         return 0.0
     try:
-        response = requests.get(f"{alpaca_rest_base()}/account", headers=alpaca_headers(), timeout=20)
+        response = requests.get(f"{alpaca_rest_base(account_type)}/account", headers=alpaca_headers(account_type), timeout=20)
         response.raise_for_status()
         account = response.json()
     except Exception:
@@ -550,6 +582,16 @@ def account_buying_power() -> float:
             except (TypeError, ValueError):
                 continue
     return 0.0
+
+
+def masked_account_key(account_type: str = "stock") -> str:
+    if account_type == "options":
+        key = app_secret("ALPACA_OPTIONS_API_KEY") or app_secret("ALPACA_API_KEY")
+    else:
+        key = app_secret("ALPACA_API_KEY")
+    if not key:
+        return "not configured"
+    return f"...{key[-6:]}"
 
 
 def inject_style() -> None:
@@ -711,13 +753,13 @@ def evaluate_signal_records(records: pd.DataFrame, horizon_days: int = 5, thresh
 
 
 def fetch_option_contracts(underlying: str, option_type: str, min_dte: int, max_dte: int, limit: int = 1000) -> pd.DataFrame:
-    if not app_secret("ALPACA_API_KEY") or not app_secret("ALPACA_SECRET_KEY"):
+    if not (app_secret("ALPACA_OPTIONS_API_KEY") or app_secret("ALPACA_API_KEY")) or not (app_secret("ALPACA_OPTIONS_SECRET_KEY") or app_secret("ALPACA_SECRET_KEY")):
         return pd.DataFrame()
     normalized_underlying = normalize_tickers([underlying])[0] if normalize_tickers([underlying]) else ""
     if not normalized_underlying:
         return pd.DataFrame()
     today = datetime.utcnow().date()
-    url = f"{alpaca_rest_base()}/options/contracts"
+    url = f"{alpaca_rest_base('options')}/options/contracts"
     params = {
         "underlying_symbols": normalized_underlying,
         "type": option_type.lower(),
@@ -727,7 +769,7 @@ def fetch_option_contracts(underlying: str, option_type: str, min_dte: int, max_
         "limit": limit,
     }
     try:
-        response = requests.get(url, params=params, headers=alpaca_headers(), timeout=20)
+        response = requests.get(url, params=params, headers=alpaca_headers("options"), timeout=20)
         response.raise_for_status()
     except Exception:
         return pd.DataFrame()
@@ -1010,6 +1052,7 @@ def page_backtesting(selected: list[str]) -> None:
 def page_paper_trading(selected: list[str], allow_penny: bool) -> None:
     st.header("Paper Trading Bot")
     st.warning("Paper trading only. Emergency stop disables scan/order actions in this session.")
+    st.caption(f"Stock paper account key: {masked_account_key('stock')}")
     active = st.multiselect("Active bot stocks", selected or DEFAULT_WATCHLIST, default=(selected or DEFAULT_WATCHLIST)[:5])
     capital = st.number_input("Paper capital", min_value=1000.0, value=25000.0, step=1000.0)
     auto_scan = st.toggle("Auto-scan every 5 minutes", value=False)
@@ -1053,7 +1096,8 @@ def page_paper_trading(selected: list[str], allow_penny: bool) -> None:
 def page_options_paper_trading() -> None:
     st.header("Options Paper Trading")
     st.warning("Paper options only. Use limit orders. Options can expire worthless and may be illiquid.")
-    available_options_bp = account_buying_power()
+    st.caption(f"Options paper account key: {masked_account_key('options')}")
+    available_options_bp = account_buying_power("options")
     st.metric("Available options buying power", f"${available_options_bp:,.2f}")
     last_scan = st.session_state.get("last_options_scan", pd.DataFrame())
     scanned_symbols = last_scan["Option Symbol"].dropna().astype(str).tolist() if not last_scan.empty and "Option Symbol" in last_scan else []
@@ -1084,14 +1128,14 @@ def page_options_paper_trading() -> None:
         result = place_option_paper_order(option_symbol, int(qty), float(limit_price), side=side)
         (st.success if result["ok"] else st.error)(result["message"])
     st.subheader("Open Option Paper Orders")
-    open_orders = open_orders_table(option_symbol if option_symbol else None)
+    open_orders = open_option_orders_table(option_symbol if option_symbol else None)
     if open_orders.empty:
         st.caption("No open paper orders for this option symbol.")
     else:
         st.dataframe(open_orders, use_container_width=True, hide_index=True)
         cancel_id = st.selectbox("Cancel option order", open_orders["id"].tolist())
         if st.button("Cancel selected option order", disabled=emergency_stop):
-            result = cancel_order(cancel_id)
+            result = cancel_option_order(cancel_id)
             (st.success if result["ok"] else st.error)(result["message"])
             st.rerun()
 
