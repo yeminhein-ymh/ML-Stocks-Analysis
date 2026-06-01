@@ -526,6 +526,10 @@ def alpaca_headers(account_type: str = "stock") -> dict:
     return {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
 
 
+def alpaca_options_data_base() -> str:
+    return "https://data.alpaca.markets/v1beta1/options"
+
+
 def parse_option_symbol(option_symbol: str) -> dict:
     match = re.match(r"^([A-Z]{1,6})(\d{6})([CP])(\d{8})$", option_symbol.strip().upper())
     if not match:
@@ -796,6 +800,79 @@ def fetch_option_contracts(underlying: str, option_type: str, min_dte: int, max_
     return frame[(frame["Status"].astype(str).str.lower() == "active") & (frame["Tradable"].astype(bool))]
 
 
+def fetch_option_snapshots(symbols: list[str]) -> pd.DataFrame:
+    clean_symbols = [symbol for symbol in dict.fromkeys([str(s).strip().upper() for s in symbols]) if symbol]
+    if not clean_symbols:
+        return pd.DataFrame()
+    rows = []
+    for start in range(0, len(clean_symbols), 100):
+        chunk = clean_symbols[start:start + 100]
+        try:
+            response = requests.get(
+                f"{alpaca_options_data_base()}/snapshots",
+                params={"symbols": ",".join(chunk), "feed": "indicative", "limit": len(chunk)},
+                headers=alpaca_headers("options"),
+                timeout=20,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception:
+            continue
+        snapshots = payload.get("snapshots") or payload
+        if isinstance(snapshots, list):
+            snapshot_items = [(item.get("symbol"), item) for item in snapshots]
+        else:
+            snapshot_items = snapshots.items()
+        for symbol, snapshot in snapshot_items:
+            if not symbol or not isinstance(snapshot, dict):
+                continue
+            greeks = snapshot.get("greeks") or {}
+            quote = snapshot.get("latestQuote") or snapshot.get("latest_quote") or {}
+            trade = snapshot.get("latestTrade") or snapshot.get("latest_trade") or {}
+            bid = quote.get("bp") or quote.get("bid_price")
+            ask = quote.get("ap") or quote.get("ask_price")
+            last = trade.get("p") or trade.get("price")
+            bid = float(bid) if bid is not None else None
+            ask = float(ask) if ask is not None else None
+            last = float(last) if last is not None else None
+            mid = (bid + ask) / 2 if bid and ask and ask >= bid else last
+            rows.append(
+                {
+                    "Option Symbol": symbol,
+                    "Delta": greeks.get("delta"),
+                    "IV": greeks.get("iv") or greeks.get("implied_volatility"),
+                    "Bid": bid,
+                    "Ask": ask,
+                    "Mid": mid,
+                    "Last": last,
+                }
+            )
+    frame = pd.DataFrame(rows)
+    for col in ["Delta", "IV", "Bid", "Ask", "Mid", "Last"]:
+        if col in frame:
+            frame[col] = pd.to_numeric(frame[col], errors="coerce")
+    return frame
+
+
+def estimate_put_delta(underlying_price: float, strike: float, dte: float) -> float:
+    if underlying_price <= 0:
+        return -0.15
+    otm_pct = max(0.0, (underlying_price - strike) / underlying_price)
+    base = 0.50 - otm_pct * 7.5
+    dte_adjustment = min(0.08, max(-0.05, (float(dte or 30) - 30) / 365))
+    return -round(min(0.50, max(0.05, base + dte_adjustment)), 3)
+
+
+def enrich_option_contracts_with_market_data(contracts: pd.DataFrame) -> pd.DataFrame:
+    if contracts.empty:
+        return contracts
+    snapshots = fetch_option_snapshots(contracts["Option Symbol"].dropna().astype(str).tolist())
+    if snapshots.empty:
+        return contracts
+    enriched = contracts.merge(snapshots, on="Option Symbol", how="left")
+    return enriched
+
+
 def options_signal_from_stock(row: pd.Series) -> str:
     if row["Final signal"] in {"Strong Buy", "Buy"}:
         return "call"
@@ -852,6 +929,69 @@ def build_options_ai_scanner(
         return pd.DataFrame()
     result = pd.concat(rows, ignore_index=True)
     return result.sort_values("Options AI score", ascending=False)
+
+
+def build_wheel_strategy_candidates(
+    selected: list[str],
+    scan_size: int,
+    target_dte: int = 30,
+    min_dte: int = 14,
+    max_dte: int = 45,
+    target_delta: float = 0.15,
+    min_delta: float = 0.10,
+    max_delta: float = 0.20,
+    allow_penny: bool = False,
+) -> pd.DataFrame:
+    stock_table = scan_stocks(scanner_universe(selected, scan_size), limit=scan_size, allow_penny_stocks=allow_penny)
+    if stock_table.empty:
+        return pd.DataFrame()
+    rows = []
+    options_bp = account_buying_power("options")
+    wheel_stocks = stock_table[
+        (stock_table["Suitability"] == "Suitable")
+        & (~stock_table["Final signal"].isin(["Sell", "Avoid"]))
+    ].copy()
+    for _, stock in wheel_stocks.iterrows():
+        contracts = fetch_option_contracts(stock["Ticker"], "put", min_dte, max_dte)
+        if contracts.empty:
+            continue
+        contracts = enrich_option_contracts_with_market_data(contracts)
+        price = float(stock["Price"])
+        contracts["Underlying Price"] = price
+        contracts["Moneyness %"] = (contracts["Strike"] / price - 1) * 100
+        contracts = contracts[contracts["Strike"] < price].copy()
+        if contracts.empty:
+            continue
+        if "Delta" not in contracts:
+            contracts["Delta"] = None
+        contracts["Delta Source"] = contracts["Delta"].notna().map({True: "Alpaca snapshot", False: "Estimated"})
+        contracts["Delta"] = contracts.apply(
+            lambda row: float(row["Delta"]) if pd.notna(row["Delta"]) else estimate_put_delta(price, row["Strike"], row["DTE"]),
+            axis=1,
+        )
+        contracts["Abs Delta"] = contracts["Delta"].abs()
+        candidates = contracts[contracts["Abs Delta"].between(min_delta, max_delta)].copy()
+        if candidates.empty:
+            candidates = contracts.iloc[(contracts["Abs Delta"] - target_delta).abs().argsort()].head(3).copy()
+        candidates["Underlying Signal"] = stock["Final signal"]
+        candidates["AI bullish probability"] = stock["AI bullish probability"]
+        candidates["Suitability score"] = stock["Suitability score"]
+        candidates["Collateral Required"] = candidates["Strike"] * 100
+        candidates["Buying Power OK"] = candidates["Collateral Required"] <= options_bp
+        candidates["Suggested side"] = "sell"
+        candidates["Wheel Score"] = (
+            candidates["Suitability score"]
+            + candidates["AI bullish probability"] * 0.25
+            - (candidates["DTE"] - target_dte).abs() * 1.2
+            - (candidates["Abs Delta"] - target_delta).abs() * 180
+            - candidates["Moneyness %"].abs() * 0.25
+            + candidates["Buying Power OK"].astype(int) * 12
+        )
+        rows.append(candidates.sort_values("Wheel Score", ascending=False).head(1))
+    if not rows:
+        return pd.DataFrame()
+    result = pd.concat(rows, ignore_index=True)
+    return result.sort_values("Wheel Score", ascending=False)
 
 
 def format_scan_table(df: pd.DataFrame) -> pd.io.formats.style.Styler:
@@ -1099,6 +1239,14 @@ def page_options_paper_trading() -> None:
     st.caption(f"Options paper account key: {masked_account_key('options')}")
     available_options_bp = account_buying_power("options")
     st.metric("Available options buying power", f"${available_options_bp:,.2f}")
+    order_tab, wheel_tab = st.tabs(["Single-Leg Option Order", "Wheel Strategy"])
+    with order_tab:
+        render_single_leg_option_order(available_options_bp)
+    with wheel_tab:
+        render_wheel_strategy(selected=st.session_state.get("selected_stocks_for_options", DEFAULT_WATCHLIST[:20]), available_options_bp=available_options_bp)
+
+
+def render_single_leg_option_order(available_options_bp: float) -> None:
     last_scan = st.session_state.get("last_options_scan", pd.DataFrame())
     scanned_symbols = last_scan["Option Symbol"].dropna().astype(str).tolist() if not last_scan.empty and "Option Symbol" in last_scan else []
     mode = st.radio("Contract source", ["Use scanner result", "Manual option symbol"], horizontal=True)
@@ -1138,6 +1286,85 @@ def page_options_paper_trading() -> None:
             result = cancel_option_order(cancel_id)
             (st.success if result["ok"] else st.error)(result["message"])
             st.rerun()
+
+
+def render_wheel_strategy(selected: list[str], available_options_bp: float) -> None:
+    st.subheader("Wheel Strategy: Cash-Secured Put Scanner")
+    st.caption("Step 1 of the wheel: sell cash-secured puts on suitable stocks you are willing to own. Defaults target 30 DTE and 0.15 absolute delta.")
+    c1, c2, c3, c4 = st.columns(4)
+    scan_size = c1.selectbox("Wheel underlying scan size", [5, 10, 20, 50], index=2)
+    target_dte = c2.number_input("Target DTE", min_value=14, max_value=45, value=30, step=1)
+    min_dte = c3.number_input("Min DTE", min_value=1, max_value=44, value=14, step=1)
+    max_dte = c4.number_input("Max DTE", min_value=15, max_value=90, value=45, step=1)
+    d1, d2, d3 = st.columns(3)
+    target_delta = d1.number_input("Target abs delta", min_value=0.10, max_value=0.20, value=0.15, step=0.01, format="%.2f")
+    min_delta = d2.number_input("Min abs delta", min_value=0.05, max_value=0.19, value=0.10, step=0.01, format="%.2f")
+    max_delta = d3.number_input("Max abs delta", min_value=0.11, max_value=0.50, value=0.20, step=0.01, format="%.2f")
+    if min_dte > target_dte or target_dte > max_dte:
+        st.error("Target DTE must be between Min DTE and Max DTE.")
+        return
+    if min_delta > target_delta or target_delta > max_delta:
+        st.error("Target delta must be between Min abs delta and Max abs delta.")
+        return
+    if st.button("Scan wheel cash-secured puts", type="primary"):
+        with st.spinner("Finding wheel strategy candidates..."):
+            wheel = build_wheel_strategy_candidates(
+                selected,
+                scan_size=scan_size,
+                target_dte=int(target_dte),
+                min_dte=int(min_dte),
+                max_dte=int(max_dte),
+                target_delta=float(target_delta),
+                min_delta=float(min_delta),
+                max_delta=float(max_delta),
+            )
+        st.session_state["last_wheel_scan"] = wheel
+    wheel = st.session_state.get("last_wheel_scan", pd.DataFrame())
+    if wheel.empty:
+        st.info("Run the wheel scan to generate cash-secured put candidates.")
+        return
+    display_cols = [
+        "Option Symbol", "Underlying", "Underlying Price", "Strike", "Expiration", "DTE",
+        "Delta", "Delta Source", "Bid", "Ask", "Mid", "Moneyness %", "Underlying Signal",
+        "AI bullish probability", "Suitability score", "Collateral Required", "Buying Power OK", "Wheel Score",
+    ]
+    display_cols = [col for col in display_cols if col in wheel.columns]
+    st.dataframe(
+        wheel[display_cols].style.format(
+            {
+                "Underlying Price": "${:.2f}",
+                "Strike": "${:.2f}",
+                "Delta": "{:.2f}",
+                "Bid": "${:.2f}",
+                "Ask": "${:.2f}",
+                "Mid": "${:.2f}",
+                "Moneyness %": "{:.2f}%",
+                "AI bullish probability": "{:.1f}%",
+                "Collateral Required": "${:,.2f}",
+                "Wheel Score": "{:.1f}",
+            }
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+    selected_symbol = st.selectbox("Wheel candidate to sell put", wheel["Option Symbol"].astype(str).tolist())
+    candidate = wheel[wheel["Option Symbol"].astype(str) == selected_symbol].iloc[0]
+    suggested_price = candidate.get("Mid")
+    if pd.isna(suggested_price) or float(suggested_price or 0) <= 0:
+        suggested_price = candidate.get("Bid")
+    suggested_price = float(suggested_price) if pd.notna(suggested_price) and float(suggested_price) > 0 else 0.05
+    c1, c2, c3 = st.columns(3)
+    qty = c1.number_input("Wheel contracts", min_value=0, value=1, step=1)
+    limit_price = c2.number_input("Wheel sell-put limit", min_value=0.0, value=round(suggested_price, 2), step=0.05, format="%.2f")
+    collateral = float(candidate["Strike"]) * 100 * qty
+    c3.metric("Cash collateral required", f"${collateral:,.2f}")
+    if collateral > available_options_bp:
+        st.error(f"Not enough options buying power for this cash-secured put. Required ${collateral:,.2f}, available ${available_options_bp:,.2f}.")
+    emergency_stop = st.toggle("Wheel emergency stop", value=False, key="wheel_emergency_stop")
+    can_submit = qty > 0 and limit_price > 0 and collateral <= available_options_bp and not emergency_stop
+    if st.button("Submit wheel cash-secured put paper order", disabled=not can_submit):
+        result = place_option_paper_order(selected_symbol, int(qty), float(limit_price), side="sell")
+        (st.success if result["ok"] else st.error)(result["message"])
 
 
 def page_risk_management() -> None:
@@ -1267,6 +1494,7 @@ def main() -> None:
 
     if not selected:
         selected = scanner_universe([], 50)
+    st.session_state["selected_stocks_for_options"] = selected
 
     if page == "Market Overview":
         page_market_overview(selected)

@@ -84,6 +84,8 @@ Options support is single-leg and paper-only. The options scanner maps bullish s
 
 Buy orders require the option premium times 100 times contracts. Sell put orders require cash-secured collateral based on strike times 100 times contracts, so the app checks available options buying power before submit. Selling uncovered calls is disabled.
 
+The Options Paper Trading page includes a Wheel Strategy tab. It scans for cash-secured put candidates using a default target of 30 DTE, a DTE range of 14-45 days, target absolute delta of 0.15, and delta range of 0.10-0.20. Alpaca option snapshots are used for delta when available; otherwise the app labels the delta as estimated.
+
 The stock paper bot and options pages can use separate Alpaca paper accounts:
 
 ```toml
