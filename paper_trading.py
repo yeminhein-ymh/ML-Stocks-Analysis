@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
 
 import pandas as pd
@@ -45,6 +46,57 @@ def position_size(capital: float, entry: float, stop: float, current_exposure: f
     shares_by_risk = int(risk_cap / risk_per_share)
     shares_by_exposure = int((capital * RISK_RULES["max_exposure_per_stock"] - current_exposure) / entry)
     return max(0, min(shares_by_risk, shares_by_exposure))
+
+
+def parse_option_symbol(option_symbol: str) -> dict:
+    match = re.match(r"^([A-Z]{1,6})(\d{6})([CP])(\d{8})$", option_symbol.strip().upper())
+    if not match:
+        return {}
+    root, expiry, option_type, strike_raw = match.groups()
+    return {
+        "underlying": root,
+        "expiration": f"20{expiry[:2]}-{expiry[2:4]}-{expiry[4:6]}",
+        "type": "call" if option_type == "C" else "put",
+        "strike": int(strike_raw) / 1000,
+    }
+
+
+def account_buying_power(client) -> float:
+    try:
+        account = client.get_account()
+    except Exception:
+        return 0.0
+    for field in ("options_buying_power", "buying_power", "cash"):
+        value = getattr(account, field, None)
+        if value is not None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+    return 0.0
+
+
+def option_order_requirement(option_symbol: str, qty: int, limit_price: float, side: str) -> dict:
+    details = parse_option_symbol(option_symbol)
+    if qty <= 0:
+        return {"ok": False, "required": 0.0, "message": "Quantity must be greater than zero."}
+    if limit_price <= 0:
+        return {"ok": False, "required": 0.0, "message": "Limit price must be greater than zero."}
+    if side.lower() == "buy":
+        return {"ok": True, "required": qty * limit_price * 100, "message": "Long option premium required."}
+    if not details:
+        return {"ok": False, "required": 0.0, "message": "Could not parse option symbol for sell-side collateral check."}
+    if details["type"] == "call":
+        return {
+            "ok": False,
+            "required": 0.0,
+            "message": "Selling uncovered calls is disabled in this paper bot. Use buy orders or close an existing long call manually.",
+        }
+    return {
+        "ok": True,
+        "required": details["strike"] * 100 * qty,
+        "message": "Cash-secured put collateral required.",
+    }
 
 
 def open_orders_for_symbol(client, ticker: str) -> list:
@@ -135,6 +187,19 @@ def place_option_paper_order(option_symbol: str, qty: int, limit_price: float, s
         return {"ok": False, "message": "Quantity is zero."}
     if limit_price <= 0:
         return {"ok": False, "message": "Limit price must be greater than zero."}
+    requirement = option_order_requirement(option_symbol, qty, limit_price, side)
+    if not requirement["ok"]:
+        return {"ok": False, "message": requirement["message"]}
+    available = account_buying_power(client)
+    if requirement["required"] > available:
+        return {
+            "ok": False,
+            "message": (
+                f"Insufficient options buying power. Required about ${requirement['required']:,.2f}; "
+                f"available about ${available:,.2f}. For sell puts, Alpaca requires cash-secured collateral "
+                "based on strike x 100 x contracts, not the limit premium."
+            ),
+        }
     blockers = opposite_side_orders(client, option_symbol, side)
     if blockers:
         order_ids = ", ".join(str(getattr(order, "id", "unknown")) for order in blockers)

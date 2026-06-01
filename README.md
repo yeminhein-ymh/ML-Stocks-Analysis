@@ -82,6 +82,8 @@ Paper bot risk controls:
 
 Options support is single-leg and paper-only. The options scanner maps bullish stock signals to call candidates and bearish/avoid signals to put candidates, then ranks active tradable contracts by DTE, moneyness, underlying signal strength, suitability, and risk/reward. The order page submits Alpaca paper limit orders only; no live options trading is implemented.
 
+Buy orders require the option premium times 100 times contracts. Sell put orders require cash-secured collateral based on strike times 100 times contracts, so the app checks available options buying power before submit. Selling uncovered calls is disabled.
+
 ## Project Structure
 
 ```text

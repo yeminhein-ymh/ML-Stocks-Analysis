@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -36,7 +37,7 @@ if not USING_EMBEDDED_FALLBACK:
         from app.core.config import DEFAULT_WATCHLIST, RISK_RULES, SIGNAL_LOG_FILE, TRADE_LOG_FILE
         from app.core.data import fetch_last_prices, market_data_healthcheck, normalize_tickers
         from app.core.modeling import train_models
-        from app.core.paper_trading import cancel_order, log_signal, open_orders_table, place_option_paper_order, place_paper_order, position_size
+        from app.core.paper_trading import cancel_order, log_signal, open_orders_table, option_order_requirement, place_option_paper_order, place_paper_order, position_size
         from app.core.screener import COMMON_UNIVERSE, screen_universe
         from app.core.watchlists import load_watchlists, parse_uploaded_watchlist, save_watchlist
     except ModuleNotFoundError:
@@ -437,6 +438,19 @@ if USING_EMBEDDED_FALLBACK:
             return {"ok": False, "message": "Installed alpaca-py version does not support limit option orders."}
         if qty <= 0 or limit_price <= 0:
             return {"ok": False, "message": "Quantity and limit price must be greater than zero."}
+        requirement = option_order_requirement(option_symbol, qty, limit_price, side)
+        if not requirement["ok"]:
+            return {"ok": False, "message": requirement["message"]}
+        available = account_buying_power()
+        if requirement["required"] > available:
+            return {
+                "ok": False,
+                "message": (
+                    f"Insufficient options buying power. Required about ${requirement['required']:,.2f}; "
+                    f"available about ${available:,.2f}. For sell puts, Alpaca requires cash-secured collateral "
+                    "based on strike x 100 x contracts, not the limit premium."
+                ),
+            }
         open_orders = open_orders_table(option_symbol)
         opposite = "sell" if side.lower() == "buy" else "buy"
         blockers = open_orders[open_orders["side"].astype(str).str.contains(opposite, case=False, na=False)] if not open_orders.empty else pd.DataFrame()
@@ -482,6 +496,60 @@ def alpaca_headers() -> dict:
     key = app_secret("ALPACA_API_KEY")
     secret = app_secret("ALPACA_SECRET_KEY")
     return {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
+
+
+def parse_option_symbol(option_symbol: str) -> dict:
+    match = re.match(r"^([A-Z]{1,6})(\d{6})([CP])(\d{8})$", option_symbol.strip().upper())
+    if not match:
+        return {}
+    root, expiry, option_type, strike_raw = match.groups()
+    return {
+        "underlying": root,
+        "expiration": f"20{expiry[:2]}-{expiry[2:4]}-{expiry[4:6]}",
+        "type": "call" if option_type == "C" else "put",
+        "strike": int(strike_raw) / 1000,
+    }
+
+
+def option_order_requirement(option_symbol: str, qty: int, limit_price: float, side: str) -> dict:
+    details = parse_option_symbol(option_symbol)
+    if qty <= 0:
+        return {"ok": False, "required": 0.0, "message": "Quantity must be greater than zero."}
+    if limit_price <= 0:
+        return {"ok": False, "required": 0.0, "message": "Limit price must be greater than zero."}
+    if side.lower() == "buy":
+        return {"ok": True, "required": qty * limit_price * 100, "message": "Long option premium required."}
+    if not details:
+        return {"ok": False, "required": 0.0, "message": "Could not parse option symbol for sell-side collateral check."}
+    if details["type"] == "call":
+        return {
+            "ok": False,
+            "required": 0.0,
+            "message": "Selling uncovered calls is disabled in this paper bot. Use buy orders or close an existing long call manually.",
+        }
+    return {
+        "ok": True,
+        "required": details["strike"] * 100 * qty,
+        "message": "Cash-secured put collateral required.",
+    }
+
+
+def account_buying_power() -> float:
+    if not app_secret("ALPACA_API_KEY") or not app_secret("ALPACA_SECRET_KEY"):
+        return 0.0
+    try:
+        response = requests.get(f"{alpaca_rest_base()}/account", headers=alpaca_headers(), timeout=20)
+        response.raise_for_status()
+        account = response.json()
+    except Exception:
+        return 0.0
+    for key in ("options_buying_power", "buying_power", "cash"):
+        if key in account and account[key] is not None:
+            try:
+                return float(account[key])
+            except (TypeError, ValueError):
+                continue
+    return 0.0
 
 
 def inject_style() -> None:
@@ -985,6 +1053,8 @@ def page_paper_trading(selected: list[str], allow_penny: bool) -> None:
 def page_options_paper_trading() -> None:
     st.header("Options Paper Trading")
     st.warning("Paper options only. Use limit orders. Options can expire worthless and may be illiquid.")
+    available_options_bp = account_buying_power()
+    st.metric("Available options buying power", f"${available_options_bp:,.2f}")
     last_scan = st.session_state.get("last_options_scan", pd.DataFrame())
     scanned_symbols = last_scan["Option Symbol"].dropna().astype(str).tolist() if not last_scan.empty and "Option Symbol" in last_scan else []
     mode = st.radio("Contract source", ["Use scanner result", "Manual option symbol"], horizontal=True)
@@ -999,11 +1069,18 @@ def page_options_paper_trading() -> None:
     c1, c2, c3 = st.columns(3)
     qty = c1.number_input("Contracts", min_value=0, value=0, step=1)
     limit_price = c2.number_input("Limit price per contract", min_value=0.0, value=0.0, step=0.05, format="%.2f")
-    side = c3.selectbox("Side", ["buy", "sell"])
-    estimated_notional = qty * limit_price * 100
-    st.metric("Estimated premium/notional", f"${estimated_notional:,.2f}")
+    side = c3.selectbox("Side", ["buy", "sell"], index=0)
+    requirement = option_order_requirement(option_symbol, int(qty), float(limit_price), side) if option_symbol else {"ok": False, "required": 0.0, "message": "Enter an option symbol."}
+    m1, m2 = st.columns(2)
+    m1.metric("Estimated requirement", f"${requirement['required']:,.2f}")
+    m2.metric("Requirement type", requirement["message"])
+    if side == "sell":
+        st.info("Selling puts requires cash-secured collateral of strike x 100 x contracts. Selling uncovered calls is disabled by this app.")
+    if option_symbol and qty > 0 and limit_price > 0 and requirement["required"] > available_options_bp:
+        st.error(f"Not enough options buying power: required about ${requirement['required']:,.2f}, available about ${available_options_bp:,.2f}.")
     emergency_stop = st.toggle("Emergency stop", value=False, key="options_emergency_stop")
-    if st.button("Submit Alpaca paper option order", type="primary", disabled=emergency_stop or not option_symbol):
+    can_submit = not emergency_stop and bool(option_symbol) and requirement["ok"] and requirement["required"] <= available_options_bp
+    if st.button("Submit Alpaca paper option order", type="primary", disabled=not can_submit):
         result = place_option_paper_order(option_symbol, int(qty), float(limit_price), side=side)
         (st.success if result["ok"] else st.error)(result["message"])
     st.subheader("Open Option Paper Orders")
