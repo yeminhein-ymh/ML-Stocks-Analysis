@@ -10,6 +10,7 @@ Streamlit dashboard and paper-trading bot for universal multi-stock analysis acr
 - CSV watchlist upload and saved custom watchlists.
 - Stock screener for formula suitability.
 - Daily signal journal for scanner and technical-indicator snapshots.
+- Daily, weekly, and monthly Technical Indicator Dashboard snapshot journal for every selected stock.
 - Signal accuracy analysis by final signal after 1, 5, 10, or 20 trading days.
 - Options AI Scanner for paper-only single-leg call/put candidates using Alpaca option contracts.
 - Options Paper Trading page for paper limit orders on selected or manually entered option contracts.
@@ -77,6 +78,16 @@ Paper bot risk controls:
 - Maximum total exposure: 80%
 - Minimum reward:risk ratio: 1:2
 - Emergency stop disables scan/order actions in the current session
+
+## Technical Indicator Records
+
+On the Technical Indicator Dashboard page, choose the stocks selected in the sidebar and record Daily, Weekly, and Monthly snapshots. Records are saved to:
+
+```text
+logs/technical_indicator_snapshots.csv
+```
+
+Each record includes ticker, period, period start/end, price, period return, high, low, volume, RSI, MACD, VWAP status, trend, ATR %, volume ratio, AI probabilities, suitability, and final signal. Re-recording the same ticker and period on the same date replaces that row to avoid duplicates.
 
 ## Options Paper Trading
 

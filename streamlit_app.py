@@ -501,6 +501,7 @@ if USING_EMBEDDED_FALLBACK:
 load_dotenv()
 
 DAILY_ANALYSIS_FILE = APP_ROOT / "logs" / "daily_signal_analysis.csv"
+TECHNICAL_SNAPSHOT_FILE = APP_ROOT / "logs" / "technical_indicator_snapshots.csv"
 
 
 def app_secret(name: str, default: str = "") -> str:
@@ -695,6 +696,101 @@ def load_daily_records() -> pd.DataFrame:
     return pd.read_csv(DAILY_ANALYSIS_FILE)
 
 
+def _period_slice(df: pd.DataFrame, period: str) -> pd.DataFrame:
+    if df.empty:
+        return df
+    data = df.copy()
+    data.index = pd.to_datetime(data.index)
+    last_day = pd.Timestamp(data.index.max()).normalize()
+    if period == "Daily":
+        return data.tail(1)
+    if period == "Weekly":
+        start_day = last_day.to_period("W").start_time.normalize()
+    elif period == "Monthly":
+        start_day = last_day.to_period("M").start_time.normalize()
+    else:
+        start_day = last_day
+    return data[data.index >= start_day]
+
+
+def _technical_snapshot_row(ticker: str, analysis: dict, period: str) -> dict:
+    df = analysis.get("Data", pd.DataFrame()).dropna()
+    window = _period_slice(df, period)
+    if window.empty:
+        raise ValueError("No technical data available")
+    latest = window.iloc[-1]
+    first_close = float(window["Close"].iloc[0])
+    last_close = float(window["Close"].iloc[-1])
+    period_return = ((last_close / first_close) - 1) * 100 if first_close else 0
+    return {
+        "Record date": pd.Timestamp.now().date().isoformat(),
+        "Recorded at": datetime.utcnow().isoformat(),
+        "Source": "Technical Indicator Dashboard",
+        "Period": period,
+        "Period start": pd.Timestamp(window.index.min()).date().isoformat(),
+        "Period end": pd.Timestamp(window.index.max()).date().isoformat(),
+        "Ticker": ticker,
+        "Price": analysis.get("Price"),
+        "Period return %": period_return,
+        "Period high": float(window["High"].max()),
+        "Period low": float(window["Low"].min()),
+        "Period volume": int(window["Volume"].sum()),
+        "RSI": float(latest.get("RSI", 0)),
+        "MACD": float(latest.get("MACD", 0)),
+        "MACD signal value": float(latest.get("MACD_Signal", 0)),
+        "MACD signal": analysis.get("MACD signal"),
+        "VWAP status": analysis.get("VWAP status"),
+        "Trend": analysis.get("Trend"),
+        "ATR %": float(latest.get("ATR_Pct", 0)),
+        "Volume ratio": float(latest.get("Volume_Ratio", 0)),
+        "AI bullish probability": analysis.get("AI bullish probability"),
+        "AI bearish probability": analysis.get("AI bearish probability"),
+        "Suitability score": analysis.get("Suitability score"),
+        "Suitability": analysis.get("Suitability"),
+        "Final signal": analysis.get("Final signal"),
+    }
+
+
+def record_technical_snapshots(tickers: list[str], periods: list[str]) -> tuple[pd.DataFrame, list[str]]:
+    rows = []
+    errors = []
+    today = pd.Timestamp.now().date().isoformat()
+    clean_tickers = normalize_tickers(tickers)
+    clean_periods = [period for period in periods if period in {"Daily", "Weekly", "Monthly"}]
+    for ticker in clean_tickers:
+        try:
+            analysis = analyze_stock(ticker)
+            if "Error" in analysis:
+                errors.append(f"{ticker}: {analysis['Error']}")
+                continue
+            for period in clean_periods:
+                rows.append(_technical_snapshot_row(ticker, analysis, period))
+        except Exception as exc:
+            errors.append(f"{ticker}: {exc}")
+    records = pd.DataFrame(rows)
+    if records.empty:
+        return records, errors
+    TECHNICAL_SNAPSHOT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if TECHNICAL_SNAPSHOT_FILE.exists():
+        existing = pd.read_csv(TECHNICAL_SNAPSHOT_FILE)
+        existing = existing[
+            ~(
+                (existing["Record date"].astype(str) == today)
+                & (existing["Ticker"].astype(str).isin(records["Ticker"].astype(str)))
+                & (existing["Period"].astype(str).isin(records["Period"].astype(str)))
+            )
+        ]
+        records = pd.concat([existing, records], ignore_index=True)
+    records.to_csv(TECHNICAL_SNAPSHOT_FILE, index=False)
+    return records.tail(len(rows)).reset_index(drop=True), errors
+
+
+def load_technical_snapshots() -> pd.DataFrame:
+    if not TECHNICAL_SNAPSHOT_FILE.exists():
+        return pd.DataFrame()
+    return pd.read_csv(TECHNICAL_SNAPSHOT_FILE)
+
+
 def evaluate_signal_records(records: pd.DataFrame, horizon_days: int = 5, threshold_pct: float = 1.5) -> pd.DataFrame:
     if records.empty:
         return records
@@ -751,6 +847,42 @@ def evaluate_signal_records(records: pd.DataFrame, horizon_days: int = 5, thresh
                 "Exit price": exit_price,
                 "Realized return %": realized,
                 "Correct": bool(correct),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def evaluate_manual_daily_change_records(records: pd.DataFrame, hold_threshold_pct: float = 1.5) -> pd.DataFrame:
+    if records.empty:
+        return records
+    output = records.copy()
+    output["Daily Change %"] = pd.to_numeric(output["Daily Change %"], errors="coerce")
+    rows = []
+    for _, row in output.iterrows():
+        signal = str(row.get("Final signal", ""))
+        daily_change = row.get("Daily Change %")
+        if pd.isna(daily_change):
+            rows.append({**row.to_dict(), "Evaluation status": "Invalid", "Correct": None, "Manual rule": "Missing Daily Change %"})
+            continue
+        if signal in {"Strong Buy", "Buy"}:
+            correct = daily_change > 0
+            rule = "Bullish signal correct when Daily Change % > 0"
+        elif signal in {"Sell", "Avoid"}:
+            correct = daily_change < 0
+            rule = "Bearish signal correct when Daily Change % < 0"
+        elif signal == "Hold":
+            correct = abs(daily_change) <= hold_threshold_pct
+            rule = f"Hold correct when abs(Daily Change %) <= {hold_threshold_pct:.2f}%"
+        else:
+            correct = False
+            rule = "Unknown signal"
+        rows.append(
+            {
+                **row.to_dict(),
+                "Evaluation status": "Evaluated",
+                "Realized return %": daily_change,
+                "Correct": bool(correct),
+                "Manual rule": rule,
             }
         )
     return pd.DataFrame(rows)
@@ -1118,7 +1250,8 @@ def page_individual_analysis(selected: list[str], allow_penny: bool) -> None:
 
 def page_technical_dashboard(selected: list[str]) -> None:
     st.header("Technical Indicator Dashboard")
-    ticker = st.selectbox("Technical ticker", selected or DEFAULT_WATCHLIST)
+    available = selected or DEFAULT_WATCHLIST
+    ticker = st.selectbox("Technical ticker", available)
     analysis = analyze_stock(ticker)
     if "Error" in analysis:
         st.warning(analysis["Error"])
@@ -1140,10 +1273,51 @@ def page_technical_dashboard(selected: list[str]) -> None:
     fig.update_layout(height=260, margin=dict(l=10, r=10, t=25, b=10))
     st.plotly_chart(fig, use_container_width=True)
     st.dataframe(df.tail(60), use_container_width=True)
-    if st.button("Record today's technical snapshot"):
+
+    st.subheader("Technical Snapshot Recorder")
+    record_tickers = st.multiselect(
+        "Stocks to record",
+        available,
+        default=available,
+        help="Uses the stocks selected in the sidebar. Records are saved locally in logs/technical_indicator_snapshots.csv.",
+    )
+    record_periods = st.multiselect(
+        "Record periods",
+        ["Daily", "Weekly", "Monthly"],
+        default=["Daily", "Weekly", "Monthly"],
+    )
+    if st.button("Record selected stocks technical snapshots"):
+        if not record_tickers:
+            st.warning("Select at least one stock to record.")
+        elif not record_periods:
+            st.warning("Select at least one period to record.")
+        else:
+            with st.spinner(f"Recording {len(record_tickers)} stock(s) across {len(record_periods)} period(s)..."):
+                saved_rows, errors = record_technical_snapshots(record_tickers, record_periods)
+            if not saved_rows.empty:
+                st.success(f"Recorded {len(saved_rows)} technical snapshot rows.")
+                st.dataframe(saved_rows, use_container_width=True, hide_index=True)
+            if errors:
+                st.warning("Some tickers could not be recorded: " + "; ".join(errors[:8]))
+
+    history = load_technical_snapshots()
+    if not history.empty:
+        st.subheader("Technical Snapshot Journal")
+        period_filter = st.multiselect("Journal period filter", ["Daily", "Weekly", "Monthly"], default=["Daily", "Weekly", "Monthly"])
+        shown = history[history["Period"].isin(period_filter)] if period_filter else history
+        shown = shown.sort_values(["Record date", "Period", "Ticker"], ascending=[False, True, True]).head(300)
+        st.dataframe(shown, use_container_width=True, hide_index=True)
+        st.download_button(
+            "Download technical snapshot journal",
+            shown.to_csv(index=False).encode("utf-8"),
+            file_name="technical_indicator_snapshots.csv",
+            mime="text/csv",
+        )
+
+    if st.button("Also record current ticker to Signal Accuracy Analysis"):
         row = pd.DataFrame([{key: value for key, value in analysis.items() if key not in {"Data", "Suitability detail", "AI detail"}}])
         saved = record_daily_rows(row, "Technical Indicator Dashboard")
-        st.success(f"Recorded {saved} technical snapshot for {ticker}.")
+        st.success(f"Recorded {saved} signal-analysis snapshot for {ticker}.")
 
 
 def page_ai_prediction(selected: list[str]) -> None:
@@ -1428,10 +1602,33 @@ def page_signal_accuracy_analysis() -> None:
     if records.empty:
         st.info("No daily records yet. Run the Multi-Stock AI Scanner with recording enabled or record a Technical Indicator Dashboard snapshot.")
         return
-    horizon = st.selectbox("Evaluation holding period", [1, 5, 10, 20], index=1)
+    records["Record date"] = pd.to_datetime(records["Record date"], errors="coerce")
+    c_filter1, c_filter2 = st.columns(2)
+    min_date = records["Record date"].min().date() if records["Record date"].notna().any() else pd.Timestamp.now().date()
+    max_date = records["Record date"].max().date() if records["Record date"].notna().any() else pd.Timestamp.now().date()
+    date_range = c_filter1.date_input("Record date range", value=(min_date, max_date))
+    source_options = sorted(records["Source"].dropna().astype(str).unique().tolist()) if "Source" in records else []
+    selected_sources = c_filter2.multiselect("Sources", source_options, default=source_options)
+    if isinstance(date_range, tuple) and len(date_range) == 2:
+        start_date, end_date = pd.Timestamp(date_range[0]), pd.Timestamp(date_range[1])
+        records = records[(records["Record date"] >= start_date) & (records["Record date"] <= end_date)]
+    if selected_sources:
+        records = records[records["Source"].astype(str).isin(selected_sources)]
+    if records.empty:
+        st.info("No recorded signals match the selected date/source filters.")
+        return
+
+    mode = st.selectbox(
+        "Accuracy calculation mode",
+        ["Future return after holding period", "Manual same-day Daily Change %"],
+    )
     threshold = st.number_input("Correctness threshold (%)", min_value=0.1, max_value=20.0, value=1.5, step=0.1)
-    with st.spinner("Evaluating recorded signals against later prices..."):
-        evaluated = evaluate_signal_records(records, horizon_days=horizon, threshold_pct=threshold)
+    if mode == "Future return after holding period":
+        horizon = st.selectbox("Evaluation holding period", [1, 5, 10, 20], index=1)
+        with st.spinner("Evaluating recorded signals against later prices..."):
+            evaluated = evaluate_signal_records(records, horizon_days=horizon, threshold_pct=threshold)
+    else:
+        evaluated = evaluate_manual_daily_change_records(records, hold_threshold_pct=threshold)
     evaluated_done = evaluated[evaluated["Evaluation status"] == "Evaluated"].copy()
     waiting = evaluated[evaluated["Evaluation status"] == "Waiting"].copy()
     c1, c2, c3, c4 = st.columns(4)
@@ -1460,7 +1657,7 @@ def page_signal_accuracy_analysis() -> None:
     show_cols = [
         "Record date", "Source", "Ticker", "Entry price", "Final signal", "Signal direction",
         "Evaluation status", "Wait reason", "Trading bars available", "Exit price", "Realized return %", "Correct", "RSI",
-        "MACD signal", "VWAP status", "Trend", "AI bullish probability", "AI bearish probability",
+        "Manual rule", "MACD signal", "VWAP status", "Trend", "AI bullish probability", "AI bearish probability",
         "Suitability score",
     ]
     show_cols = [col for col in show_cols if col in evaluated.columns]
