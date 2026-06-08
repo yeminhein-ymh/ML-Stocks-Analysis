@@ -11,7 +11,7 @@ Streamlit dashboard and paper-trading bot for universal multi-stock analysis acr
 - Stock screener for formula suitability.
 - Daily signal journal for scanner and technical-indicator snapshots.
 - Daily, weekly, and monthly Technical Indicator Dashboard snapshot journal for every selected stock.
-- Signal accuracy analysis by final signal after 1, 5, 10, or 20 trading days.
+- Signal accuracy analysis by final signal after 1, 5, 10, or 20 trading days, with daily recording and 1-month to 1-year journal views.
 - Options AI Scanner for paper-only single-leg call/put candidates using Alpaca option contracts.
 - Options Paper Trading page for paper limit orders on selected or manually entered option contracts.
 - Suitability gate before AI signals.
@@ -88,6 +88,16 @@ logs/technical_indicator_snapshots.csv
 ```
 
 Each record includes ticker, period, period start/end, price, period return, high, low, volume, RSI, MACD, VWAP status, trend, ATR %, volume ratio, AI probabilities, suitability, and final signal. Re-recording the same ticker and period on the same date replaces that row to avoid duplicates.
+
+## Recorded Signal Journal
+
+The Signal Accuracy Analysis page includes a Daily Signal Journal Recorder. It records today's selected stock signals into:
+
+```text
+logs/daily_signal_analysis.csv
+```
+
+Use the journal range control to review Last 1 month, Last 3 months, Last 6 months, Last 1 year, All history, or a custom date range. Accuracy summaries can be grouped daily, monthly, or yearly.
 
 ## Options Paper Trading
 

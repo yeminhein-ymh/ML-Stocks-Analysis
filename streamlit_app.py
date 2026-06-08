@@ -1595,20 +1595,71 @@ def page_watchlist_manager(selected: list[str]) -> None:
         st.dataframe(format_scan_table(result), use_container_width=True, hide_index=True)
 
 
-def page_signal_accuracy_analysis() -> None:
+def _date_range_from_preset(records: pd.DataFrame, preset: str) -> tuple[pd.Timestamp, pd.Timestamp]:
+    today = pd.Timestamp.now().normalize()
+    min_date = records["Record date"].min().normalize() if records["Record date"].notna().any() else today
+    if preset == "Last 1 month":
+        start = today - pd.DateOffset(months=1)
+    elif preset == "Last 3 months":
+        start = today - pd.DateOffset(months=3)
+    elif preset == "Last 6 months":
+        start = today - pd.DateOffset(months=6)
+    elif preset == "Last 1 year":
+        start = today - pd.DateOffset(years=1)
+    else:
+        start = min_date
+    return pd.Timestamp(start).normalize(), today
+
+
+def page_signal_accuracy_analysis(selected: list[str], allow_penny: bool) -> None:
     st.header("Signal Accuracy Analysis")
-    st.caption("This page grades recorded scanner and technical signals after the selected holding period.")
+    st.caption("This page records daily scanner signals and grades them over monthly to yearly journal ranges.")
+    with st.expander("Daily Signal Journal Recorder", expanded=False):
+        journal_tickers = st.multiselect(
+            "Stocks to record today",
+            selected or DEFAULT_WATCHLIST,
+            default=selected or DEFAULT_WATCHLIST,
+            help="Records one row per selected stock for today's Recorded Signal Journal.",
+        )
+        limit_options = [5, 10, 20, 50, 100]
+        default_limit = next((option for option in limit_options if option >= min(50, len(journal_tickers) if journal_tickers else 5)), 50)
+        journal_limit = st.select_slider("Maximum stocks to record", options=limit_options, value=default_limit)
+        if st.button("Record today's selected stock signals", type="primary"):
+            if not journal_tickers:
+                st.warning("Select at least one stock to record.")
+            else:
+                universe = scanner_universe(journal_tickers, int(journal_limit))
+                with st.spinner("Scanning and recording today's signals..."):
+                    table = scan_stocks(universe, limit=int(journal_limit), allow_penny_stocks=allow_penny)
+                if table.empty:
+                    st.warning("No signals were available to record.")
+                else:
+                    saved = record_daily_rows(table, "Daily Selected Stock Signals")
+                    st.success(f"Recorded {saved} signal(s) for today's journal.")
+                    st.dataframe(format_scan_table(table), use_container_width=True, hide_index=True)
+
     records = load_daily_records()
     if records.empty:
-        st.info("No daily records yet. Run the Multi-Stock AI Scanner with recording enabled or record a Technical Indicator Dashboard snapshot.")
+        st.info("No daily records yet. Use the Daily Signal Journal Recorder above or run the Multi-Stock AI Scanner with recording enabled.")
         return
     records["Record date"] = pd.to_datetime(records["Record date"], errors="coerce")
-    c_filter1, c_filter2 = st.columns(2)
+    c_filter1, c_filter2, c_filter3 = st.columns(3)
+    range_preset = c_filter1.selectbox(
+        "Journal range",
+        ["Last 1 month", "Last 3 months", "Last 6 months", "Last 1 year", "All history", "Custom"],
+        index=3,
+    )
     min_date = records["Record date"].min().date() if records["Record date"].notna().any() else pd.Timestamp.now().date()
     max_date = records["Record date"].max().date() if records["Record date"].notna().any() else pd.Timestamp.now().date()
-    date_range = c_filter1.date_input("Record date range", value=(min_date, max_date))
+    if range_preset == "Custom":
+        date_range = c_filter2.date_input("Custom record date range", value=(min_date, max_date))
+    else:
+        preset_start, preset_end = _date_range_from_preset(records, range_preset)
+        date_range = (preset_start.date(), preset_end.date())
+        c_filter2.metric("Start date", preset_start.date().isoformat())
+        c_filter3.metric("End date", preset_end.date().isoformat())
     source_options = sorted(records["Source"].dropna().astype(str).unique().tolist()) if "Source" in records else []
-    selected_sources = c_filter2.multiselect("Sources", source_options, default=source_options)
+    selected_sources = st.multiselect("Sources", source_options, default=source_options)
     if isinstance(date_range, tuple) and len(date_range) == 2:
         start_date, end_date = pd.Timestamp(date_range[0]), pd.Timestamp(date_range[1])
         records = records[(records["Record date"] >= start_date) & (records["Record date"] <= end_date)]
@@ -1638,6 +1689,16 @@ def page_signal_accuracy_analysis() -> None:
     accuracy = evaluated_done["Correct"].mean() if not evaluated_done.empty else 0
     c4.metric("Correct final signals", f"{accuracy:.1%}")
     if not evaluated_done.empty:
+        summary_period = st.selectbox("Accuracy summary period", ["Daily", "Monthly", "Yearly"], index=1)
+        evaluated_done["Summary period"] = evaluated_done["Record date"].dt.to_period({"Daily": "D", "Monthly": "M", "Yearly": "Y"}[summary_period]).astype(str)
+        by_period = (
+            evaluated_done.groupby("Summary period")
+            .agg(Signals=("Ticker", "count"), Correct=("Correct", "sum"), Accuracy=("Correct", "mean"), Avg_Return=("Realized return %", "mean"))
+            .reset_index()
+            .sort_values("Summary period", ascending=False)
+        )
+        st.subheader(f"Accuracy by {summary_period}")
+        st.dataframe(by_period.style.format({"Accuracy": "{:.1%}", "Avg_Return": "{:.2f}%"}), use_container_width=True, hide_index=True)
         by_signal = (
             evaluated_done.groupby("Final signal")
             .agg(Signals=("Ticker", "count"), Correct=("Correct", "sum"), Accuracy=("Correct", "mean"), Avg_Return=("Realized return %", "mean"))
@@ -1662,7 +1723,9 @@ def page_signal_accuracy_analysis() -> None:
     ]
     show_cols = [col for col in show_cols if col in evaluated.columns]
     st.dataframe(evaluated[show_cols], use_container_width=True, hide_index=True)
-    st.download_button("Download signal journal", evaluated.to_csv(index=False), "daily_signal_analysis.csv", "text/csv")
+    st.download_button("Download filtered signal journal", evaluated.to_csv(index=False), "daily_signal_analysis_filtered.csv", "text/csv")
+    full_records = load_daily_records()
+    st.download_button("Download full signal journal", full_records.to_csv(index=False), "daily_signal_analysis_full.csv", "text/csv")
 
 
 def main() -> None:
@@ -1708,7 +1771,7 @@ def main() -> None:
     elif page == "Backtesting":
         page_backtesting(selected)
     elif page == "Signal Accuracy Analysis":
-        page_signal_accuracy_analysis()
+        page_signal_accuracy_analysis(selected, allow_penny)
     elif page == "Paper Trading Bot":
         page_paper_trading(selected, allow_penny)
     elif page == "Options Paper Trading":
