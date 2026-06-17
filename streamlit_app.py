@@ -501,6 +501,7 @@ if USING_EMBEDDED_FALLBACK:
 load_dotenv()
 
 DAILY_ANALYSIS_FILE = APP_ROOT / "logs" / "daily_signal_analysis.csv"
+SCANNER_HISTORY_FILE = APP_ROOT / "logs" / "multi_stock_ai_scanner_history.csv"
 TECHNICAL_SNAPSHOT_FILE = APP_ROOT / "logs" / "technical_indicator_snapshots.csv"
 
 
@@ -694,6 +695,54 @@ def load_daily_records() -> pd.DataFrame:
     if not DAILY_ANALYSIS_FILE.exists():
         return pd.DataFrame()
     return pd.read_csv(DAILY_ANALYSIS_FILE)
+
+
+def record_scanner_history(rows: pd.DataFrame, scan_size: int) -> int:
+    if rows.empty:
+        return 0
+    SCANNER_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    today = pd.Timestamp.now().date().isoformat()
+    records = rows.copy()
+    records.insert(0, "Archive date", today)
+    records.insert(1, "Recorded at", datetime.utcnow().isoformat())
+    records.insert(2, "Source", "Multi-Stock AI Scanner")
+    records.insert(3, "Scan size", int(scan_size))
+    if SCANNER_HISTORY_FILE.exists():
+        existing = pd.read_csv(SCANNER_HISTORY_FILE)
+        existing = existing[
+            ~(
+                (existing["Archive date"].astype(str) == today)
+                & (existing["Ticker"].astype(str).isin(records["Ticker"].astype(str)))
+            )
+        ]
+        records = pd.concat([existing, records], ignore_index=True)
+    records.to_csv(SCANNER_HISTORY_FILE, index=False)
+    return len(rows)
+
+
+def load_scanner_history() -> pd.DataFrame:
+    if not SCANNER_HISTORY_FILE.exists():
+        return pd.DataFrame()
+    return pd.read_csv(SCANNER_HISTORY_FILE)
+
+
+def filter_history_range(records: pd.DataFrame, date_col: str, preset: str) -> pd.DataFrame:
+    if records.empty or date_col not in records:
+        return records
+    output = records.copy()
+    output[date_col] = pd.to_datetime(output[date_col], errors="coerce")
+    today = pd.Timestamp.now().normalize()
+    if preset == "Last 1 month":
+        start = today - pd.DateOffset(months=1)
+    elif preset == "Last 3 months":
+        start = today - pd.DateOffset(months=3)
+    elif preset == "Last 6 months":
+        start = today - pd.DateOffset(months=6)
+    elif preset == "Last 1 year":
+        start = today - pd.DateOffset(years=1)
+    else:
+        return output
+    return output[output[date_col] >= start]
 
 
 def _period_slice(df: pd.DataFrame, period: str) -> pd.DataFrame:
@@ -1142,6 +1191,44 @@ def format_scan_table(df: pd.DataFrame) -> pd.io.formats.style.Styler:
     return df.style.format({k: v for k, v in numeric_cols.items() if k in df.columns})
 
 
+def render_scanner_history_reference() -> None:
+    history = load_scanner_history()
+    if history.empty:
+        st.info("No scanner reference archive yet. Run the scanner with daily archive enabled to start saving history.")
+        return
+    st.subheader("Multi-Stock Scanner Reference Archive")
+    c1, c2, c3 = st.columns(3)
+    range_preset = c1.selectbox(
+        "Scanner archive range",
+        ["Last 1 month", "Last 3 months", "Last 6 months", "Last 1 year", "All history"],
+        index=3,
+    )
+    ticker_options = sorted(history["Ticker"].dropna().astype(str).unique().tolist()) if "Ticker" in history else []
+    selected_tickers = c2.multiselect("Archive tickers", ticker_options, default=ticker_options[:20])
+    signal_options = sorted(history["Final signal"].dropna().astype(str).unique().tolist()) if "Final signal" in history else []
+    selected_signals = c3.multiselect("Archive signals", signal_options, default=signal_options)
+    shown = filter_history_range(history, "Archive date", range_preset)
+    if selected_tickers:
+        shown = shown[shown["Ticker"].astype(str).isin(selected_tickers)]
+    if selected_signals:
+        shown = shown[shown["Final signal"].astype(str).isin(selected_signals)]
+    if shown.empty:
+        st.info("No scanner archive rows match the selected filters.")
+        return
+    shown = shown.sort_values(["Archive date", "Ticker"], ascending=[False, True])
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Archived rows", f"{len(shown):,}")
+    m2.metric("Archived dates", shown["Archive date"].astype(str).nunique())
+    m3.metric("Archived tickers", shown["Ticker"].astype(str).nunique() if "Ticker" in shown else 0)
+    st.dataframe(format_scan_table(shown.head(500)), use_container_width=True, hide_index=True)
+    st.download_button(
+        "Download scanner reference archive",
+        shown.to_csv(index=False).encode("utf-8"),
+        file_name="multi_stock_ai_scanner_history.csv",
+        mime="text/csv",
+    )
+
+
 def price_chart(df: pd.DataFrame, ticker: str) -> go.Figure:
     fig = go.Figure()
     fig.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name=ticker))
@@ -1172,20 +1259,27 @@ def page_multi_stock_scanner(selected: list[str], allow_penny: bool) -> pd.DataF
     universe = scanner_universe(selected, scan_size)
     st.caption(f"Ready to scan {len(universe)} stocks. Selected symbols are prioritized, then the built-in liquid-stock universe fills the rest.")
     record_run = st.checkbox("Record this scanner run for signal accuracy analysis", value=True)
+    archive_run = st.checkbox("Save full scanner table to daily one-year reference archive", value=True)
     run = st.button("Run scanner", type="primary")
     if not run:
         st.info("Choose a scan size and run the scanner.")
+        render_scanner_history_reference()
         return pd.DataFrame()
     with st.spinner("Scanning selected stocks..."):
         table = scan_stocks(universe, limit=scan_size, allow_penny_stocks=allow_penny)
     if table.empty:
         st.warning("No scan results were available.")
+        render_scanner_history_reference()
         return table
     st.dataframe(format_scan_table(table), use_container_width=True, hide_index=True)
     if record_run:
         saved = record_daily_rows(table, "Multi-Stock AI Scanner")
         st.success(f"Recorded {saved} scanner signal(s) for today's analysis journal.")
+    if archive_run:
+        archived = record_scanner_history(table, scan_size)
+        st.success(f"Saved {archived} scanner row(s) to the daily reference archive.")
     st.download_button("Download scanner results", table.to_csv(index=False), "scanner_results.csv", "text/csv")
+    render_scanner_history_reference()
     return table
 
 
@@ -1303,9 +1397,27 @@ def page_technical_dashboard(selected: list[str]) -> None:
     history = load_technical_snapshots()
     if not history.empty:
         st.subheader("Technical Snapshot Journal")
-        period_filter = st.multiselect("Journal period filter", ["Daily", "Weekly", "Monthly"], default=["Daily", "Weekly", "Monthly"])
-        shown = history[history["Period"].isin(period_filter)] if period_filter else history
+        c1, c2, c3 = st.columns(3)
+        range_preset = c1.selectbox(
+            "Technical journal range",
+            ["Last 1 month", "Last 3 months", "Last 6 months", "Last 1 year", "All history"],
+            index=3,
+        )
+        period_filter = c2.multiselect("Journal period filter", ["Daily", "Weekly", "Monthly"], default=["Daily", "Weekly", "Monthly"])
+        ticker_options = sorted(history["Ticker"].dropna().astype(str).unique().tolist()) if "Ticker" in history else []
+        ticker_filter = c3.multiselect("Journal tickers", ticker_options, default=ticker_options[:20])
+        shown = filter_history_range(history, "Record date", range_preset)
+        shown = shown[shown["Period"].isin(period_filter)] if period_filter else shown
+        if ticker_filter:
+            shown = shown[shown["Ticker"].astype(str).isin(ticker_filter)]
+        if shown.empty:
+            st.info("No technical snapshot rows match the selected filters.")
+            return
         shown = shown.sort_values(["Record date", "Period", "Ticker"], ascending=[False, True, True]).head(300)
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Archived rows", f"{len(shown):,}")
+        m2.metric("Archived dates", shown["Record date"].astype(str).nunique())
+        m3.metric("Archived tickers", shown["Ticker"].astype(str).nunique() if "Ticker" in shown else 0)
         st.dataframe(shown, use_container_width=True, hide_index=True)
         st.download_button(
             "Download technical snapshot journal",

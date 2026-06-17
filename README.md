@@ -11,6 +11,7 @@ Streamlit dashboard and paper-trading bot for universal multi-stock analysis acr
 - Stock screener for formula suitability.
 - Daily signal journal for scanner and technical-indicator snapshots.
 - Daily, weekly, and monthly Technical Indicator Dashboard snapshot journal for every selected stock.
+- Daily Multi-Stock AI Scanner reference archive with one-month through one-year history views.
 - Signal accuracy analysis by final signal after 1, 5, 10, or 20 trading days, with daily recording and 1-month to 1-year journal views.
 - Options AI Scanner for paper-only single-leg call/put candidates using Alpaca option contracts.
 - Options Paper Trading page for paper limit orders on selected or manually entered option contracts.
@@ -98,6 +99,16 @@ logs/daily_signal_analysis.csv
 ```
 
 Use the journal range control to review Last 1 month, Last 3 months, Last 6 months, Last 1 year, All history, or a custom date range. Accuracy summaries can be grouped daily, monthly, or yearly.
+
+## Multi-Stock Scanner Records
+
+The Multi-Stock AI Scanner page can save each full scanner table into:
+
+```text
+logs/multi_stock_ai_scanner_history.csv
+```
+
+Keep `Save full scanner table to daily one-year reference archive` enabled when running the scanner. The page shows the saved reference archive with Last 1 month, Last 3 months, Last 6 months, Last 1 year, and All history filters. Re-running the same ticker on the same date replaces that row.
 
 ## Options Paper Trading
 
