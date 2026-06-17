@@ -740,6 +740,10 @@ def filter_history_range(records: pd.DataFrame, date_col: str, preset: str) -> p
         start = today - pd.DateOffset(months=6)
     elif preset == "Last 1 year":
         start = today - pd.DateOffset(years=1)
+    elif preset == "Last 2 years":
+        start = today - pd.DateOffset(years=2)
+    elif preset == "Last 5 years":
+        start = today - pd.DateOffset(years=5)
     else:
         return output
     return output[output[date_col] >= start]
@@ -1200,7 +1204,7 @@ def render_scanner_history_reference() -> None:
     c1, c2, c3 = st.columns(3)
     range_preset = c1.selectbox(
         "Scanner archive range",
-        ["Last 1 month", "Last 3 months", "Last 6 months", "Last 1 year", "All history"],
+        ["Last 1 month", "Last 3 months", "Last 6 months", "Last 1 year", "Last 2 years", "Last 5 years", "All history"],
         index=3,
     )
     ticker_options = sorted(history["Ticker"].dropna().astype(str).unique().tolist()) if "Ticker" in history else []
@@ -1400,7 +1404,7 @@ def page_technical_dashboard(selected: list[str]) -> None:
         c1, c2, c3 = st.columns(3)
         range_preset = c1.selectbox(
             "Technical journal range",
-            ["Last 1 month", "Last 3 months", "Last 6 months", "Last 1 year", "All history"],
+            ["Last 1 month", "Last 3 months", "Last 6 months", "Last 1 year", "Last 2 years", "Last 5 years", "All history"],
             index=3,
         )
         period_filter = c2.multiselect("Journal period filter", ["Daily", "Weekly", "Monthly"], default=["Daily", "Weekly", "Monthly"])
@@ -1718,6 +1722,10 @@ def _date_range_from_preset(records: pd.DataFrame, preset: str) -> tuple[pd.Time
         start = today - pd.DateOffset(months=6)
     elif preset == "Last 1 year":
         start = today - pd.DateOffset(years=1)
+    elif preset == "Last 2 years":
+        start = today - pd.DateOffset(years=2)
+    elif preset == "Last 5 years":
+        start = today - pd.DateOffset(years=5)
     else:
         start = min_date
     return pd.Timestamp(start).normalize(), today
@@ -1725,7 +1733,8 @@ def _date_range_from_preset(records: pd.DataFrame, preset: str) -> tuple[pd.Time
 
 def page_signal_accuracy_analysis(selected: list[str], allow_penny: bool) -> None:
     st.header("Signal Accuracy Analysis")
-    st.caption("This page records daily scanner signals and grades them over monthly to yearly journal ranges.")
+    st.caption("This page records daily scanner signals and keeps them as a long-term reference journal.")
+    st.info(f"Recorded Signal Journal is saved permanently at {DAILY_ANALYSIS_FILE}. Run the recorder once per trading day to build daily history for years.")
     with st.expander("Daily Signal Journal Recorder", expanded=False):
         journal_tickers = st.multiselect(
             "Stocks to record today",
@@ -1758,7 +1767,7 @@ def page_signal_accuracy_analysis(selected: list[str], allow_penny: bool) -> Non
     c_filter1, c_filter2, c_filter3 = st.columns(3)
     range_preset = c_filter1.selectbox(
         "Journal range",
-        ["Last 1 month", "Last 3 months", "Last 6 months", "Last 1 year", "All history", "Custom"],
+        ["Last 1 month", "Last 3 months", "Last 6 months", "Last 1 year", "Last 2 years", "Last 5 years", "All history", "Custom"],
         index=3,
     )
     min_date = records["Record date"].min().date() if records["Record date"].notna().any() else pd.Timestamp.now().date()
@@ -1780,6 +1789,13 @@ def page_signal_accuracy_analysis(selected: list[str], allow_penny: bool) -> Non
     if records.empty:
         st.info("No recorded signals match the selected date/source filters.")
         return
+
+    full_records = load_daily_records()
+    full_records["Record date"] = pd.to_datetime(full_records["Record date"], errors="coerce")
+    s1, s2, s3 = st.columns(3)
+    s1.metric("All saved journal rows", f"{len(full_records):,}")
+    s2.metric("Saved trading dates", full_records["Record date"].dt.date.astype(str).nunique())
+    s3.metric("Saved years", full_records["Record date"].dt.year.dropna().astype(int).nunique())
 
     mode = st.selectbox(
         "Accuracy calculation mode",
@@ -1836,7 +1852,6 @@ def page_signal_accuracy_analysis(selected: list[str], allow_penny: bool) -> Non
     show_cols = [col for col in show_cols if col in evaluated.columns]
     st.dataframe(evaluated[show_cols], use_container_width=True, hide_index=True)
     st.download_button("Download filtered signal journal", evaluated.to_csv(index=False), "daily_signal_analysis_filtered.csv", "text/csv")
-    full_records = load_daily_records()
     st.download_button("Download full signal journal", full_records.to_csv(index=False), "daily_signal_analysis_full.csv", "text/csv")
 
 

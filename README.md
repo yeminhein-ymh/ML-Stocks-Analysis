@@ -98,7 +98,7 @@ The Signal Accuracy Analysis page includes a Daily Signal Journal Recorder. It r
 logs/daily_signal_analysis.csv
 ```
 
-Use the journal range control to review Last 1 month, Last 3 months, Last 6 months, Last 1 year, All history, or a custom date range. Accuracy summaries can be grouped daily, monthly, or yearly.
+Use the journal range control to review Last 1 month, Last 3 months, Last 6 months, Last 1 year, Last 2 years, Last 5 years, All history, or a custom date range. Accuracy summaries can be grouped daily, monthly, or yearly. Re-recording the same ticker/source on the same date replaces that row, while older dates are kept for long-term reference.
 
 ## Multi-Stock Scanner Records
 
@@ -108,7 +108,7 @@ The Multi-Stock AI Scanner page can save each full scanner table into:
 logs/multi_stock_ai_scanner_history.csv
 ```
 
-Keep `Save full scanner table to daily one-year reference archive` enabled when running the scanner. The page shows the saved reference archive with Last 1 month, Last 3 months, Last 6 months, Last 1 year, and All history filters. Re-running the same ticker on the same date replaces that row.
+Keep `Save full scanner table to daily one-year reference archive` enabled when running the scanner. The page shows the saved reference archive with Last 1 month, Last 3 months, Last 6 months, Last 1 year, Last 2 years, Last 5 years, and All history filters. Re-running the same ticker on the same date replaces that row.
 
 ## Options Paper Trading
 
