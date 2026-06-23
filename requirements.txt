@@ -8,3 +8,4 @@ scikit-learn>=1.4
 python-dotenv>=1.0
 alpaca-py>=0.28
 requests>=2.31
+openpyxl>=3.1

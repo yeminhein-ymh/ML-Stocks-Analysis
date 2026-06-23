@@ -12,6 +12,7 @@ Streamlit dashboard and paper-trading bot for universal multi-stock analysis acr
 - Daily signal journal for scanner and technical-indicator snapshots.
 - Daily, weekly, and monthly Technical Indicator Dashboard snapshot journal for every selected stock.
 - Daily Multi-Stock AI Scanner reference archive with one-month through one-year history views.
+- Automatic daily Top 50 autosave for scanner results, technical snapshots, signal journal rows, and Excel signal reports.
 - Signal accuracy analysis by final signal after 1, 5, 10, or 20 trading days, with daily recording and 1-month to 1-year journal views.
 - Options AI Scanner for paper-only single-leg call/put candidates using Alpaca option contracts.
 - Options Paper Trading page for paper limit orders on selected or manually entered option contracts.
@@ -99,6 +100,18 @@ logs/daily_signal_analysis.csv
 ```
 
 Use the journal range control to review Last 1 month, Last 3 months, Last 6 months, Last 1 year, Last 2 years, Last 5 years, All history, or a custom date range. Accuracy summaries can be grouped daily, monthly, or yearly. Re-recording the same ticker/source on the same date replaces that row, while older dates are kept for long-term reference.
+
+The Signal Accuracy Analysis page also includes automatic daily Top 50 autosave. When enabled, it saves:
+
+```text
+logs/daily_signal_analysis.csv
+logs/multi_stock_ai_scanner_history.csv
+logs/technical_indicator_snapshots.csv
+logs/daily_excel_reports/daily_top50_signal_analysis_YYYY-MM-DD.xlsx
+logs/daily_excel_reports/signal_accuracy_1d_YYYY-MM-DD.xlsx
+```
+
+Excel reports include an `All Signals` sheet plus separate sheets for Strong Buy, Buy, Hold, Sell, and Avoid. The default evaluation holding period is 1 day, with selectable periods for 3 days, 7 days, 2 weeks, and 1 month.
 
 ## Multi-Stock Scanner Records
 

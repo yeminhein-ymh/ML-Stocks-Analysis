@@ -503,6 +503,8 @@ load_dotenv()
 DAILY_ANALYSIS_FILE = APP_ROOT / "logs" / "daily_signal_analysis.csv"
 SCANNER_HISTORY_FILE = APP_ROOT / "logs" / "multi_stock_ai_scanner_history.csv"
 TECHNICAL_SNAPSHOT_FILE = APP_ROOT / "logs" / "technical_indicator_snapshots.csv"
+DAILY_EXCEL_DIR = APP_ROOT / "logs" / "daily_excel_reports"
+AUTO_DAILY_SOURCE = "Auto Top 50 Daily Scanner"
 
 
 def app_secret(name: str, default: str = "") -> str:
@@ -724,6 +726,69 @@ def load_scanner_history() -> pd.DataFrame:
     if not SCANNER_HISTORY_FILE.exists():
         return pd.DataFrame()
     return pd.read_csv(SCANNER_HISTORY_FILE)
+
+
+def _today_exists(path: Path, date_col: str, source: str | None = None) -> bool:
+    if not path.exists():
+        return False
+    try:
+        records = pd.read_csv(path)
+    except Exception:
+        return False
+    if records.empty or date_col not in records:
+        return False
+    today = pd.Timestamp.now().date().isoformat()
+    mask = records[date_col].astype(str) == today
+    if source and "Source" in records:
+        mask &= records["Source"].astype(str) == source
+    return bool(mask.any())
+
+
+def export_signal_workbook(rows: pd.DataFrame, report_date: str, prefix: str) -> Path | None:
+    if rows.empty:
+        return None
+    DAILY_EXCEL_DIR.mkdir(parents=True, exist_ok=True)
+    path = DAILY_EXCEL_DIR / f"{prefix}_{report_date}.xlsx"
+    sheet_order = ["Strong Buy", "Buy", "Hold", "Sell", "Avoid"]
+    try:
+        with pd.ExcelWriter(path, engine="openpyxl") as writer:
+            rows.to_excel(writer, sheet_name="All Signals", index=False)
+            for signal in sheet_order:
+                filtered = rows[rows.get("Final signal", pd.Series(dtype=str)).astype(str) == signal]
+                if not filtered.empty:
+                    filtered.to_excel(writer, sheet_name=signal[:31], index=False)
+    except Exception:
+        fallback = DAILY_EXCEL_DIR / f"{prefix}_{report_date}.csv"
+        rows.to_csv(fallback, index=False)
+        return fallback
+    return path
+
+
+def run_daily_top50_autosave(selected: list[str], allow_penny: bool, force: bool = False) -> dict:
+    today = pd.Timestamp.now().date().isoformat()
+    already_saved = (
+        _today_exists(DAILY_ANALYSIS_FILE, "Record date", AUTO_DAILY_SOURCE)
+        and _today_exists(SCANNER_HISTORY_FILE, "Archive date")
+        and _today_exists(TECHNICAL_SNAPSHOT_FILE, "Record date", "Technical Indicator Dashboard")
+    )
+    if already_saved and not force:
+        return {"status": "skipped", "message": f"Top 50 autosave already exists for {today}."}
+    universe = scanner_universe(selected, 50)
+    table = scan_stocks(universe, limit=50, allow_penny_stocks=allow_penny)
+    if table.empty:
+        return {"status": "empty", "message": "No top 50 scanner data was available to autosave."}
+    signal_rows = table[table["Final signal"].isin(["Strong Buy", "Buy", "Hold", "Sell", "Avoid"])].copy()
+    signal_count = record_daily_rows(signal_rows, AUTO_DAILY_SOURCE)
+    scanner_count = record_scanner_history(table, 50)
+    technical_rows, technical_errors = record_technical_snapshots(table["Ticker"].astype(str).tolist()[:50], ["Daily"])
+    workbook_path = export_signal_workbook(signal_rows, today, "daily_top50_signal_analysis")
+    return {
+        "status": "saved",
+        "message": f"Autosaved {scanner_count} scanner row(s), {len(technical_rows)} technical row(s), and {signal_count} signal journal row(s).",
+        "table": table,
+        "technical_errors": technical_errors,
+        "workbook_path": workbook_path,
+    }
 
 
 def filter_history_range(records: pd.DataFrame, date_col: str, preset: str) -> pd.DataFrame:
@@ -1735,6 +1800,22 @@ def page_signal_accuracy_analysis(selected: list[str], allow_penny: bool) -> Non
     st.header("Signal Accuracy Analysis")
     st.caption("This page records daily scanner signals and keeps them as a long-term reference journal.")
     st.info(f"Recorded Signal Journal is saved permanently at {DAILY_ANALYSIS_FILE}. Run the recorder once per trading day to build daily history for years.")
+    auto_daily = st.checkbox("Auto save today's Top 50 scanner + technical data", value=True)
+    force_auto = st.button("Force rerun today's Top 50 autosave")
+    if auto_daily or force_auto:
+        with st.spinner("Checking daily Top 50 autosave..."):
+            autosave = run_daily_top50_autosave(selected, allow_penny, force=force_auto)
+        if autosave["status"] == "saved":
+            st.success(autosave["message"])
+            if autosave.get("workbook_path"):
+                st.caption(f"Excel report saved: {autosave['workbook_path']}")
+            if autosave.get("technical_errors"):
+                st.warning("Some technical rows could not be saved: " + "; ".join(autosave["technical_errors"][:8]))
+        elif autosave["status"] == "skipped":
+            st.caption(autosave["message"])
+        else:
+            st.warning(autosave["message"])
+
     with st.expander("Daily Signal Journal Recorder", expanded=False):
         journal_tickers = st.multiselect(
             "Stocks to record today",
@@ -1803,10 +1884,19 @@ def page_signal_accuracy_analysis(selected: list[str], allow_penny: bool) -> Non
     )
     threshold = st.number_input("Correctness threshold (%)", min_value=0.1, max_value=20.0, value=1.5, step=0.1)
     if mode == "Future return after holding period":
-        horizon = st.selectbox("Evaluation holding period", [1, 5, 10, 20], index=1)
+        horizon_options = {
+            "1 day": 1,
+            "3 days": 3,
+            "7 days": 7,
+            "2 weeks": 10,
+            "1 month": 20,
+        }
+        horizon_label = st.selectbox("Evaluation holding period", list(horizon_options.keys()), index=0)
+        horizon = horizon_options[horizon_label]
         with st.spinner("Evaluating recorded signals against later prices..."):
             evaluated = evaluate_signal_records(records, horizon_days=horizon, threshold_pct=threshold)
     else:
+        horizon = 1
         evaluated = evaluate_manual_daily_change_records(records, hold_threshold_pct=threshold)
     evaluated_done = evaluated[evaluated["Evaluation status"] == "Evaluated"].copy()
     waiting = evaluated[evaluated["Evaluation status"] == "Waiting"].copy()
@@ -1851,6 +1941,9 @@ def page_signal_accuracy_analysis(selected: list[str], allow_penny: bool) -> Non
     ]
     show_cols = [col for col in show_cols if col in evaluated.columns]
     st.dataframe(evaluated[show_cols], use_container_width=True, hide_index=True)
+    evaluated_workbook = export_signal_workbook(evaluated, pd.Timestamp.now().date().isoformat(), f"signal_accuracy_{horizon}d")
+    if evaluated_workbook:
+        st.caption(f"Daily Signal Accuracy Excel saved: {evaluated_workbook}")
     st.download_button("Download filtered signal journal", evaluated.to_csv(index=False), "daily_signal_analysis_filtered.csv", "text/csv")
     st.download_button("Download full signal journal", full_records.to_csv(index=False), "daily_signal_analysis_full.csv", "text/csv")
 
