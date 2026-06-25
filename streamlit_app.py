@@ -954,6 +954,8 @@ def load_signal_accuracy_records() -> pd.DataFrame:
     combined = pd.concat([records, technical_records], ignore_index=True) if not technical_records.empty else records
     if combined.empty:
         return combined
+    if "Source" in combined:
+        combined = combined[combined["Source"].astype(str) != "Technical Indicator Dashboard"].copy()
     combined["Record date"] = pd.to_datetime(combined["Record date"], errors="coerce")
     combined["Recorded at"] = pd.to_datetime(combined["Recorded at"], errors="coerce")
     combined = combined.sort_values("Recorded at", na_position="first")
@@ -1546,11 +1548,6 @@ def page_technical_dashboard(selected: list[str]) -> None:
             file_name="technical_indicator_snapshots.csv",
             mime="text/csv",
         )
-
-    if st.button("Also record current ticker to Signal Accuracy Analysis"):
-        row = pd.DataFrame([{key: value for key, value in analysis.items() if key not in {"Data", "Suitability detail", "AI detail"}}])
-        saved = record_daily_rows(row, "Technical Indicator Dashboard")
-        st.success(f"Recorded {saved} signal-analysis snapshot for {ticker}.")
 
 
 def page_ai_prediction(selected: list[str]) -> None:
