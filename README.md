@@ -91,6 +91,8 @@ logs/technical_indicator_snapshots.csv
 
 Each record includes ticker, period, period start/end, price, period return, high, low, volume, RSI, MACD, VWAP status, trend, ATR %, volume ratio, AI probabilities, suitability, and final signal. Re-recording the same ticker and period on the same date replaces that row to avoid duplicates.
 
+Daily technical snapshots are also included in Signal Accuracy Analysis as the source `Daily Technical Snapshot Journal`, so the Accuracy by Source table reflects all selected technical-dashboard stocks instead of only the manually recorded ticker.
+
 ## Recorded Signal Journal
 
 The Signal Accuracy Analysis page includes a Daily Signal Journal Recorder. It records today's selected stock signals into:

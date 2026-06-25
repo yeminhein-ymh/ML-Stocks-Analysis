@@ -900,13 +900,65 @@ def record_technical_snapshots(tickers: list[str], periods: list[str]) -> tuple[
         ]
         records = pd.concat([existing, records], ignore_index=True)
     records.to_csv(TECHNICAL_SNAPSHOT_FILE, index=False)
-    return records.tail(len(rows)).reset_index(drop=True), errors
+    saved_rows = records.tail(len(rows)).reset_index(drop=True)
+    daily_signal_rows = technical_snapshots_to_signal_records(saved_rows)
+    if not daily_signal_rows.empty:
+        record_daily_rows(daily_signal_rows, "Daily Technical Snapshot Journal")
+    return saved_rows, errors
 
 
 def load_technical_snapshots() -> pd.DataFrame:
     if not TECHNICAL_SNAPSHOT_FILE.exists():
         return pd.DataFrame()
     return pd.read_csv(TECHNICAL_SNAPSHOT_FILE)
+
+
+def technical_snapshots_to_signal_records(snapshots: pd.DataFrame) -> pd.DataFrame:
+    if snapshots.empty or "Period" not in snapshots:
+        return pd.DataFrame()
+    daily = snapshots[snapshots["Period"].astype(str) == "Daily"].copy()
+    if daily.empty:
+        return pd.DataFrame()
+    records = pd.DataFrame(
+        {
+            "Record date": daily.get("Record date"),
+            "Recorded at": daily.get("Recorded at"),
+            "Source": "Daily Technical Snapshot Journal",
+            "Ticker": daily.get("Ticker"),
+            "Entry price": daily.get("Price"),
+            "Daily Change %": daily.get("Period return %"),
+            "Volume": daily.get("Period volume"),
+            "RSI": daily.get("RSI"),
+            "MACD signal": daily.get("MACD signal"),
+            "VWAP status": daily.get("VWAP status"),
+            "Trend": daily.get("Trend"),
+            "AI bullish probability": daily.get("AI bullish probability"),
+            "AI bearish probability": daily.get("AI bearish probability"),
+            "Buy zone": None,
+            "Stop loss": None,
+            "Take profit": None,
+            "Risk-reward ratio": None,
+            "Suitability score": daily.get("Suitability score"),
+            "Suitability": daily.get("Suitability"),
+            "Suitability reasons": None,
+            "Final signal": daily.get("Final signal"),
+        }
+    )
+    records["Signal direction"] = records["Final signal"].map(signal_direction)
+    return records
+
+
+def load_signal_accuracy_records() -> pd.DataFrame:
+    records = load_daily_records()
+    technical_records = technical_snapshots_to_signal_records(load_technical_snapshots())
+    combined = pd.concat([records, technical_records], ignore_index=True) if not technical_records.empty else records
+    if combined.empty:
+        return combined
+    combined["Record date"] = pd.to_datetime(combined["Record date"], errors="coerce")
+    combined["Recorded at"] = pd.to_datetime(combined["Recorded at"], errors="coerce")
+    combined = combined.sort_values("Recorded at", na_position="first")
+    combined = combined.drop_duplicates(["Record date", "Source", "Ticker"], keep="last")
+    return combined
 
 
 def evaluate_signal_records(records: pd.DataFrame, horizon_days: int = 5, threshold_pct: float = 1.5) -> pd.DataFrame:
@@ -1840,9 +1892,9 @@ def page_signal_accuracy_analysis(selected: list[str], allow_penny: bool) -> Non
                     st.success(f"Recorded {saved} signal(s) for today's journal.")
                     st.dataframe(format_scan_table(table), use_container_width=True, hide_index=True)
 
-    records = load_daily_records()
+    records = load_signal_accuracy_records()
     if records.empty:
-        st.info("No daily records yet. Use the Daily Signal Journal Recorder above or run the Multi-Stock AI Scanner with recording enabled.")
+        st.info("No daily records yet. Use the Daily Signal Journal Recorder above, run the Multi-Stock AI Scanner with recording enabled, or record Daily technical snapshots.")
         return
     records["Record date"] = pd.to_datetime(records["Record date"], errors="coerce")
     c_filter1, c_filter2, c_filter3 = st.columns(3)
@@ -1871,7 +1923,7 @@ def page_signal_accuracy_analysis(selected: list[str], allow_penny: bool) -> Non
         st.info("No recorded signals match the selected date/source filters.")
         return
 
-    full_records = load_daily_records()
+    full_records = load_signal_accuracy_records()
     full_records["Record date"] = pd.to_datetime(full_records["Record date"], errors="coerce")
     s1, s2, s3 = st.columns(3)
     s1.metric("All saved journal rows", f"{len(full_records):,}")
