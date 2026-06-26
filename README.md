@@ -103,6 +103,14 @@ logs/daily_signal_analysis.csv
 
 Use the journal range control to review Last 1 month, Last 3 months, Last 6 months, Last 1 year, Last 2 years, Last 5 years, All history, or a custom date range. Accuracy summaries can be grouped daily, monthly, or yearly. Re-recording the same ticker/source on the same date replaces that row, while older dates are kept for long-term reference.
 
+The app keeps a rolling 365-day local archive and writes backup CSVs under:
+
+```text
+logs/archive_backups/
+```
+
+If running on Streamlit Cloud, files under `logs/` can reset after app redeploy/reboot because Streamlit Cloud does not provide permanent database storage. Download the full signal journal regularly, or use the Signal Accuracy Analysis import tool to restore a previous CSV/Excel journal into the current app storage.
+
 The Signal Accuracy Analysis page also includes automatic daily Top 50 autosave. When enabled, it saves:
 
 ```text

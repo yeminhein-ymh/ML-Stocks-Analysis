@@ -504,7 +504,9 @@ DAILY_ANALYSIS_FILE = APP_ROOT / "logs" / "daily_signal_analysis.csv"
 SCANNER_HISTORY_FILE = APP_ROOT / "logs" / "multi_stock_ai_scanner_history.csv"
 TECHNICAL_SNAPSHOT_FILE = APP_ROOT / "logs" / "technical_indicator_snapshots.csv"
 DAILY_EXCEL_DIR = APP_ROOT / "logs" / "daily_excel_reports"
+ARCHIVE_BACKUP_DIR = APP_ROOT / "logs" / "archive_backups"
 AUTO_DAILY_SOURCE = "Auto Top 50 Daily Scanner"
+RETENTION_DAYS = 365
 
 
 def app_secret(name: str, default: str = "") -> str:
@@ -658,6 +660,27 @@ def signal_direction(signal: str) -> str:
     return "Neutral"
 
 
+def apply_retention(records: pd.DataFrame, date_col: str, days: int = RETENTION_DAYS) -> pd.DataFrame:
+    if records.empty or date_col not in records:
+        return records
+    output = records.copy()
+    dates = pd.to_datetime(output[date_col], errors="coerce")
+    cutoff = pd.Timestamp.now().normalize() - pd.Timedelta(days=days)
+    return output[(dates.isna()) | (dates >= cutoff)]
+
+
+def save_csv_archive(records: pd.DataFrame, path: Path, date_col: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    records = apply_retention(records, date_col)
+    records.to_csv(path, index=False)
+    try:
+        ARCHIVE_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        backup_path = ARCHIVE_BACKUP_DIR / f"{path.stem}_{pd.Timestamp.now().date().isoformat()}.csv"
+        records.to_csv(backup_path, index=False)
+    except Exception:
+        pass
+
+
 def record_daily_rows(rows: pd.DataFrame, source: str) -> int:
     if rows.empty:
         return 0
@@ -689,7 +712,7 @@ def record_daily_rows(rows: pd.DataFrame, source: str) -> int:
             )
         ]
         records = pd.concat([existing, records], ignore_index=True)
-    records.to_csv(DAILY_ANALYSIS_FILE, index=False)
+    save_csv_archive(records, DAILY_ANALYSIS_FILE, "Record date")
     return len(rows)
 
 
@@ -718,7 +741,7 @@ def record_scanner_history(rows: pd.DataFrame, scan_size: int) -> int:
             )
         ]
         records = pd.concat([existing, records], ignore_index=True)
-    records.to_csv(SCANNER_HISTORY_FILE, index=False)
+    save_csv_archive(records, SCANNER_HISTORY_FILE, "Archive date")
     return len(rows)
 
 
@@ -899,7 +922,7 @@ def record_technical_snapshots(tickers: list[str], periods: list[str]) -> tuple[
             )
         ]
         records = pd.concat([existing, records], ignore_index=True)
-    records.to_csv(TECHNICAL_SNAPSHOT_FILE, index=False)
+    save_csv_archive(records, TECHNICAL_SNAPSHOT_FILE, "Record date")
     saved_rows = records.tail(len(rows)).reset_index(drop=True)
     daily_signal_rows = technical_snapshots_to_signal_records(saved_rows)
     if not daily_signal_rows.empty:
@@ -961,6 +984,35 @@ def load_signal_accuracy_records() -> pd.DataFrame:
     combined = combined.sort_values("Recorded at", na_position="first")
     combined = combined.drop_duplicates(["Record date", "Source", "Ticker"], keep="last")
     return combined
+
+
+def import_signal_journal_file(uploaded_file) -> int:
+    if uploaded_file is None:
+        return 0
+    name = getattr(uploaded_file, "name", "").lower()
+    if name.endswith(".xlsx"):
+        sheets = pd.read_excel(uploaded_file, sheet_name=None)
+        imported = pd.concat(sheets.values(), ignore_index=True)
+    else:
+        imported = pd.read_csv(uploaded_file)
+    if imported.empty:
+        return 0
+    if "Record date" not in imported or "Ticker" not in imported:
+        raise ValueError("Imported journal must include Record date and Ticker columns.")
+    if "Source" not in imported:
+        imported["Source"] = "Imported Signal Journal"
+    if "Final signal" not in imported:
+        imported["Final signal"] = "Hold"
+    imported["Signal direction"] = imported["Final signal"].map(signal_direction)
+    if "Recorded at" not in imported:
+        imported["Recorded at"] = datetime.utcnow().isoformat()
+    existing = load_daily_records()
+    combined = pd.concat([existing, imported], ignore_index=True) if not existing.empty else imported
+    combined["Record date"] = pd.to_datetime(combined["Record date"], errors="coerce").dt.date.astype(str)
+    combined = combined.sort_values("Recorded at", na_position="first")
+    combined = combined.drop_duplicates(["Record date", "Source", "Ticker"], keep="last")
+    save_csv_archive(combined, DAILY_ANALYSIS_FILE, "Record date")
+    return len(imported)
 
 
 def evaluate_signal_records(records: pd.DataFrame, horizon_days: int = 5, threshold_pct: float = 1.5) -> pd.DataFrame:
@@ -1849,6 +1901,18 @@ def page_signal_accuracy_analysis(selected: list[str], allow_penny: bool) -> Non
     st.header("Signal Accuracy Analysis")
     st.caption("This page records daily scanner signals and keeps them as a long-term reference journal.")
     st.info(f"Recorded Signal Journal is saved permanently at {DAILY_ANALYSIS_FILE}. Run the recorder once per trading day to build daily history for years.")
+    with st.expander("Restore previous daily journal data", expanded=False):
+        uploaded_journal = st.file_uploader("Import previous signal journal CSV or Excel", type=["csv", "xlsx"])
+        if st.button("Import journal history"):
+            if uploaded_journal is None:
+                st.warning("Choose a CSV or Excel journal file first.")
+            else:
+                try:
+                    imported_count = import_signal_journal_file(uploaded_journal)
+                    st.success(f"Imported {imported_count} journal row(s).")
+                except Exception as exc:
+                    st.error(f"Could not import journal: {exc}")
+
     auto_daily = st.checkbox("Auto save today's Top 50 scanner + technical data", value=True)
     force_auto = st.button("Force rerun today's Top 50 autosave")
     if auto_daily or force_auto:
