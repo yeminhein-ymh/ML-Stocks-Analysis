@@ -15,6 +15,7 @@ Streamlit dashboard and paper-trading bot for universal multi-stock analysis acr
 - Automatic daily Top 50 autosave for scanner results, technical snapshots, signal journal rows, and Excel signal reports.
 - Signal accuracy analysis by final signal after 1, 5, 10, or 20 trading days, with daily recording and 1-month to 1-year journal views.
 - Options AI Scanner for paper-only single-leg call/put candidates using Alpaca option contracts.
+- Short Strategy Stock Scanner for educational low-float short setup research: Gap Up Short, Bounce Short, First Red Day, and Watchlist Monitor.
 - Options Paper Trading page for paper limit orders on selected or manually entered option contracts.
 - Suitability gate before AI signals.
 - Random Forest and optional XGBoost training with time-series splits.
@@ -25,17 +26,18 @@ Streamlit dashboard and paper-trading bot for universal multi-stock analysis acr
 
 1. Market Overview
 2. Multi-Stock AI Scanner
-3. Options AI Scanner
-4. Individual Stock Analysis
-5. Technical Indicator Dashboard
-6. AI Prediction Model
-7. Backtesting
-8. Signal Accuracy Analysis
-9. Paper Trading Bot
-10. Options Paper Trading
-11. Risk Management
-12. Portfolio Allocation
-13. Watchlist Manager
+3. Short Strategy Stock Scanner
+4. Options AI Scanner
+5. Individual Stock Analysis
+6. Technical Indicator Dashboard
+7. AI Prediction Model
+8. Backtesting
+9. Signal Accuracy Analysis
+10. Paper Trading Bot
+11. Options Paper Trading
+12. Risk Management
+13. Portfolio Allocation
+14. Watchlist Manager
 
 ## Install
 
@@ -134,6 +136,17 @@ logs/multi_stock_ai_scanner_history.csv
 ```
 
 Keep `Save full scanner table to daily one-year reference archive` enabled when running the scanner. The page shows the saved reference archive with Last 1 month, Last 3 months, Last 6 months, Last 1 year, Last 2 years, Last 5 years, and All history filters. Re-running the same ticker on the same date replaces that row.
+
+## Short Strategy Stock Scanner
+
+The Short Strategy Stock Scanner is an educational scanner for low-float/small-cap short setup research. It applies global filters for minimum price, maximum market cap, excluded sectors, and excluded countries, then provides four tabs:
+
+- Gap Up Short: identifies large gap-up runners, post-open push, consolidation high/low, crack alerts, and setup score.
+- Bounce Short: compares current moves against historical dollar-block resistance zones.
+- First Red Day: looks for multi-day parabolic runs, exhaustion risk, and first-red-day triggers.
+- Watchlist: monitors manually entered tickers with crack/rejection/volume-fade status and a chart.
+
+When paid APIs are not configured, the scanner uses Yahoo/fallback mock data so the dashboard remains usable for testing. It does not place trades.
 
 ## Options Paper Trading
 

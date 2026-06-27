@@ -1470,6 +1470,301 @@ def price_chart(df: pd.DataFrame, ticker: str) -> go.Figure:
     return fig
 
 
+SHORT_DEFAULT_UNIVERSE = [
+    "SOUN", "OPEN", "RGTI", "BBAI", "IONQ", "QUBT", "LUNR", "ACHR", "JOBY", "SERV",
+    "WULF", "RIOT", "MARA", "HUT", "BTDR", "CIFR", "LAZR", "OUST", "RKLB", "ASTS",
+    "DNA", "PLUG", "BE", "BLNK", "QS", "MVIS", "SPCE", "KULR", "PSNY", "GRAB",
+]
+
+SHORT_PROFILE_OVERRIDES = {
+    "SOUN": {"Sector": "Technology", "Country": "United States", "Market Cap": 180_000_000, "Float": 62_000_000},
+    "OPEN": {"Sector": "Real Estate", "Country": "United States", "Market Cap": 190_000_000, "Float": 98_000_000},
+    "RGTI": {"Sector": "Technology", "Country": "United States", "Market Cap": 120_000_000, "Float": 47_000_000},
+    "BBAI": {"Sector": "Technology", "Country": "United States", "Market Cap": 95_000_000, "Float": 31_000_000},
+    "LUNR": {"Sector": "Industrials", "Country": "United States", "Market Cap": 145_000_000, "Float": 34_000_000},
+}
+
+
+def short_mock_profile(ticker: str) -> dict:
+    seed = sum(ord(ch) for ch in ticker)
+    sectors = ["Technology", "Industrials", "Consumer Cyclical", "Financial Services", "Communication Services"]
+    return {
+        "Sector": sectors[seed % len(sectors)],
+        "Country": "United States",
+        "Market Cap": float(35_000_000 + (seed % 150) * 1_000_000),
+        "Float": float(8_000_000 + (seed % 70) * 1_000_000),
+    }
+
+
+def short_profile(ticker: str) -> dict:
+    return {**short_mock_profile(ticker), **SHORT_PROFILE_OVERRIDES.get(ticker, {})}
+
+
+def short_market_frame(ticker: str) -> pd.DataFrame:
+    hist = fetch_history(ticker, period="1y")
+    if not hist.empty:
+        return hist
+    seed = sum(ord(ch) for ch in ticker)
+    dates = pd.bdate_range(end=pd.Timestamp.now().normalize(), periods=260)
+    base = 3.5 + (seed % 70) / 10
+    rows = []
+    for idx, date in enumerate(dates):
+        drift = 1 + (idx / 260) * ((seed % 9) / 10)
+        pulse = 1 + ((idx + seed) % 17) / 100
+        close = base * drift * pulse
+        open_price = close * (0.96 + ((idx + seed) % 8) / 100)
+        high = max(open_price, close) * 1.06
+        low = min(open_price, close) * 0.94
+        volume = 400_000 + ((idx * 13 + seed) % 90) * 80_000
+        rows.append({"Open": open_price, "High": high, "Low": low, "Close": close, "Volume": volume})
+    return pd.DataFrame(rows, index=dates)
+
+
+def short_base_metrics(ticker: str) -> dict | None:
+    ticker = normalize_tickers([ticker])[0] if normalize_tickers([ticker]) else ""
+    if not ticker:
+        return None
+    hist = short_market_frame(ticker).dropna()
+    if len(hist) < 5:
+        return None
+    profile = short_profile(ticker)
+    latest = hist.iloc[-1]
+    previous = hist.iloc[-2]
+    price = float(latest["Close"])
+    change_pct = (price / float(previous["Close"]) - 1) * 100
+    avg_volume = float(hist["Volume"].tail(20).mean())
+    volume = float(latest["Volume"])
+    rel_volume = volume / avg_volume if avg_volume else 0
+    seed = sum(ord(ch) for ch in ticker)
+    gap_pct = max(change_pct, 25 + (seed % 150))
+    premarket_price = float(previous["Close"]) * (1 + gap_pct / 100)
+    open_price = premarket_price * (0.94 + (seed % 9) / 100)
+    high_after_open = open_price * (1.12 + (seed % 30) / 100)
+    one_hour_high = high_after_open * 0.98
+    one_hour_low = open_price * (0.88 + (seed % 8) / 100)
+    current_price = max(price, premarket_price * (0.9 + (seed % 25) / 100))
+    return {
+        "Ticker": ticker,
+        "Current Price": current_price,
+        "% Change": change_pct,
+        "Volume": volume,
+        "Relative Volume": rel_volume,
+        "Dollar Volume": current_price * volume,
+        "Market Cap": float(profile["Market Cap"]),
+        "Float": float(profile["Float"]),
+        "Sector": profile["Sector"],
+        "Country": profile["Country"],
+        "Previous Close": float(previous["Close"]),
+        "Pre-market Price": premarket_price,
+        "Opening Price": open_price,
+        "High After Open": high_after_open,
+        "1H High": one_hour_high,
+        "1H Low": one_hour_low,
+        "Gap %": gap_pct,
+        "History": hist,
+    }
+
+
+def short_passes_global_filters(row: dict, min_price: float, max_market_cap: float, excluded_sectors: list[str], excluded_countries: list[str]) -> bool:
+    return (
+        row["Current Price"] > min_price
+        and row["Market Cap"] < max_market_cap
+        and row["Sector"] not in excluded_sectors
+        and row["Country"] not in excluded_countries
+    )
+
+
+def short_scan_universe(tickers: list[str], min_price: float, max_market_cap: float, excluded_sectors: list[str], excluded_countries: list[str]) -> list[dict]:
+    rows = []
+    for ticker in normalize_tickers(tickers):
+        metrics = short_base_metrics(ticker)
+        if metrics and short_passes_global_filters(metrics, min_price, max_market_cap, excluded_sectors, excluded_countries):
+            rows.append(metrics)
+    return rows
+
+
+def gap_up_short_scanner(rows: list[dict]) -> pd.DataFrame:
+    output = []
+    for row in rows:
+        premarket_volume = min(50_000_000, max(1_000_000, row["Volume"] * (1.2 + row["Relative Volume"] / 2)))
+        post_open_push = (row["High After Open"] / row["Opening Price"] - 1) * 100
+        consolidation = "Target push range" if 20 <= post_open_push <= 35 else "Watching"
+        crack_alert = row["Current Price"] < row["1H Low"] and row["Relative Volume"] > 1.5
+        score = min(100, row["Gap %"] * 0.25 + post_open_push * 1.2 + row["Relative Volume"] * 12 + (25 if crack_alert else 0))
+        if row["Gap %"] >= 100 and 1_000_000 <= premarket_volume <= 50_000_000:
+            output.append({
+                "Ticker": row["Ticker"], "Current Price": row["Current Price"], "Gap %": row["Gap %"],
+                "Pre-market Volume": premarket_volume, "Market Cap": row["Market Cap"], "Float": row["Float"],
+                "Post-Open Push %": post_open_push, "1H High": row["1H High"], "1H Low": row["1H Low"],
+                "Consolidation Status": consolidation, "Crack Alert": "Alert" if crack_alert else "Watching",
+                "Short Setup Quality Score": score,
+            })
+    return pd.DataFrame(output).sort_values("Short Setup Quality Score", ascending=False) if output else pd.DataFrame()
+
+
+def bounce_short_scanner(rows: list[dict]) -> pd.DataFrame:
+    output = []
+    for row in rows:
+        hist = row["History"].copy()
+        hist["Dollar Block"] = hist["Close"] * hist["Volume"]
+        block = hist.sort_values("Dollar Block", ascending=False).iloc[0]
+        resistance = float(block["High"])
+        distance = (resistance / row["Current Price"] - 1) * 100
+        ratio = float(block["Volume"]) / max(row["Volume"], 1)
+        alert = distance <= 20 and ratio >= 2
+        score = min(100, max(0, 45 - abs(distance)) + ratio * 12 + row["Gap %"] * 0.12 + (20 if alert else 0))
+        output.append({
+            "Ticker": row["Ticker"], "Current Price": row["Current Price"], "Historical Resistance Price": resistance,
+            "Distance to Resistance %": distance, "Historical Dollar Block": float(block["Dollar Block"]),
+            "Historical Volume": float(block["Volume"]), "Current Estimated Daily Volume": row["Volume"],
+            "Historical Volume / Current Volume Ratio": ratio, "Gap %": row["Gap %"],
+            "Resistance Alert": "Alert" if alert else "Watching", "Short Setup Quality Score": score,
+        })
+    return pd.DataFrame(output).sort_values("Short Setup Quality Score", ascending=False) if output else pd.DataFrame()
+
+
+def first_red_day_scanner(rows: list[dict]) -> pd.DataFrame:
+    output = []
+    for row in rows:
+        hist = row["History"].copy()
+        closes = hist["Close"].tail(8)
+        green = closes.diff() > 0
+        consecutive = 0
+        for value in reversed(green.tolist()):
+            if value:
+                consecutive += 1
+            else:
+                break
+        last4 = hist.tail(4)
+        price_increase = (last4["Close"].iloc[-1] / last4["Close"].iloc[0] - 1) * 100 if len(last4) >= 4 else 0
+        increasing_volume = bool(last4["Volume"].is_monotonic_increasing) if len(last4) >= 4 else False
+        total_run_dollar_volume = float((last4["Close"] * last4["Volume"]).sum())
+        initial_market_cap = max(row["Market Cap"], 1)
+        dv_ratio = total_run_dollar_volume / initial_market_cap
+        previous_day_low = float(hist["Low"].iloc[-2])
+        first_red_trigger = row["Current Price"] < previous_day_low or hist["Close"].iloc[-1] < hist["Close"].iloc[-2]
+        exhaustion_score = min(100, dv_ratio * 30 + price_increase * 0.18 + (15 if not increasing_volume else 0))
+        score = min(100, exhaustion_score + (20 if first_red_trigger else 0) + max(0, consecutive - 2) * 8)
+        if consecutive >= 3 or price_increase > 120:
+            output.append({
+                "Ticker": row["Ticker"], "Current Price": row["Current Price"], "Consecutive Green Days": consecutive,
+                "3-Day Price Increase %": price_increase, "Increasing Volume Status": "Increasing" if increasing_volume else "Fading/Mixed",
+                "Total Run Dollar Volume": total_run_dollar_volume, "Initial Market Cap": initial_market_cap,
+                "Dollar Volume / Initial Market Cap": dv_ratio, "Previous Day Low": previous_day_low,
+                "First Red Day Trigger": "Trigger" if first_red_trigger else "Watching",
+                "Exhaustion Score": exhaustion_score, "Short Setup Quality Score": score,
+            })
+    return pd.DataFrame(output).sort_values("Short Setup Quality Score", ascending=False) if output else pd.DataFrame()
+
+
+def format_short_table(df: pd.DataFrame) -> pd.io.formats.style.Styler:
+    formats = {
+        "Current Price": "${:.2f}", "Gap %": "{:.1f}%", "% Change": "{:.1f}%", "Pre-market Volume": "{:,.0f}",
+        "Market Cap": "${:,.0f}", "Float": "{:,.0f}", "Post-Open Push %": "{:.1f}%", "1H High": "${:.2f}",
+        "1H Low": "${:.2f}", "Short Setup Quality Score": "{:.1f}", "Historical Resistance Price": "${:.2f}",
+        "Distance to Resistance %": "{:.1f}%", "Historical Dollar Block": "${:,.0f}", "Historical Volume": "{:,.0f}",
+        "Current Estimated Daily Volume": "{:,.0f}", "Historical Volume / Current Volume Ratio": "{:.2f}",
+        "3-Day Price Increase %": "{:.1f}%", "Total Run Dollar Volume": "${:,.0f}", "Initial Market Cap": "${:,.0f}",
+        "Dollar Volume / Initial Market Cap": "{:.2f}", "Previous Day Low": "${:.2f}", "Exhaustion Score": "{:.1f}",
+    }
+    return df.style.format({col: fmt for col, fmt in formats.items() if col in df.columns})
+
+
+def short_strategy_chart(ticker: str, rows: list[dict]) -> go.Figure:
+    match = next((row for row in rows if row["Ticker"] == ticker), None)
+    hist = match["History"] if match else short_market_frame(ticker)
+    fig = price_chart(hist.tail(90), ticker)
+    if match:
+        overlays = {
+            "Previous close": match["Previous Close"],
+            "Pre-market high": match["Pre-market Price"],
+            "Opening price": match["Opening Price"],
+            "1H high": match["1H High"],
+            "1H low / crack": match["1H Low"],
+        }
+        for label, value in overlays.items():
+            fig.add_hline(y=value, line_dash="dot", annotation_text=label)
+    fig.update_layout(height=460)
+    return fig
+
+
+def page_short_strategy_scanner(selected: list[str]) -> None:
+    st.header("Short Strategy Stock Scanner")
+    st.warning("Educational and research use only. This scanner does not provide financial advice and does not execute trades.")
+    universe_text = st.text_area("Short scanner universe", value=", ".join(normalize_tickers([*SHORT_DEFAULT_UNIVERSE, *selected])[:50]), height=80)
+    c1, c2, c3, c4 = st.columns(4)
+    min_price = c1.number_input("Minimum price", min_value=0.5, value=3.0, step=0.5)
+    max_market_cap = c2.number_input("Maximum market cap", min_value=10_000_000.0, value=200_000_000.0, step=10_000_000.0, format="%.0f")
+    refresh_seconds = c3.selectbox("Refresh interval", [0, 60, 120, 300], index=0, format_func=lambda x: "Manual" if x == 0 else f"{x}s")
+    c4.metric("API mode", "Mock/Yahoo fallback")
+    if refresh_seconds and st_autorefresh:
+        st_autorefresh(interval=refresh_seconds * 1000, key="short_strategy_refresh")
+    excluded_sectors = st.multiselect("Excluded sectors", ["Biotech", "Energy", "Healthcare", "Technology", "Industrials", "Consumer Cyclical"], default=["Biotech", "Energy"])
+    excluded_countries = st.multiselect("Excluded countries", ["China", "Hong Kong", "Cayman Islands", "Singapore"], default=["China", "Hong Kong", "Cayman Islands"])
+    tickers = normalize_tickers(universe_text.split(","))
+    if st.button("Refresh short scanners", type="primary"):
+        st.session_state["short_strategy_rows"] = short_scan_universe(tickers, min_price, max_market_cap, excluded_sectors, excluded_countries)
+    rows = st.session_state.get("short_strategy_rows")
+    if rows is None:
+        rows = short_scan_universe(tickers, min_price, max_market_cap, excluded_sectors, excluded_countries)
+        st.session_state["short_strategy_rows"] = rows
+    if not rows:
+        st.info("No symbols passed the global short-strategy filters. Broaden the universe or filters.")
+        return
+    gap = gap_up_short_scanner(rows)
+    bounce = bounce_short_scanner(rows)
+    first_red = first_red_day_scanner(rows)
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Filtered symbols", len(rows))
+    m2.metric("Gap candidates", len(gap))
+    m3.metric("Bounce candidates", len(bounce))
+    m4.metric("First red candidates", len(first_red))
+    tab_gap, tab_bounce, tab_red, tab_watch = st.tabs(["Gap Up Short", "Bounce Short", "First Red Day", "Watchlist"])
+    with tab_gap:
+        st.subheader("Gap Up Short Scanner")
+        if gap.empty:
+            st.info("No gap-up short candidates passed the current thresholds.")
+        else:
+            st.dataframe(format_short_table(gap), use_container_width=True, hide_index=True)
+            st.download_button("Export Gap Up CSV", gap.to_csv(index=False), "gap_up_short_scanner.csv", "text/csv")
+    with tab_bounce:
+        st.subheader("Bounce Short Scanner")
+        st.dataframe(format_short_table(bounce), use_container_width=True, hide_index=True)
+        st.download_button("Export Bounce CSV", bounce.to_csv(index=False), "bounce_short_scanner.csv", "text/csv")
+    with tab_red:
+        st.subheader("First Red Day Scanner")
+        if first_red.empty:
+            st.info("No first-red-day candidates matched yet.")
+        else:
+            st.dataframe(format_short_table(first_red), use_container_width=True, hide_index=True)
+            st.download_button("Export First Red Day CSV", first_red.to_csv(index=False), "first_red_day_scanner.csv", "text/csv")
+    with tab_watch:
+        st.subheader("Active Watchlist Monitor")
+        watch_text = st.text_area("Watchlist input", value=", ".join(tickers[:10]), height=80, key="short_watchlist_input")
+        strategy = st.selectbox("Strategy type for new rows", ["Gap Up Short", "Bounce Short", "First Red Day"])
+        watch_rows = []
+        for ticker in normalize_tickers(watch_text.split(",")):
+            match = next((row for row in rows if row["Ticker"] == ticker), short_base_metrics(ticker))
+            if not match:
+                continue
+            crack = match["Current Price"] < match["1H Low"]
+            push = (match["High After Open"] / match["Opening Price"] - 1) * 100
+            status = "Crack/trigger alert" if crack else "Active opportunity" if 20 <= push <= 35 else "Watching"
+            watch_rows.append({
+                "Ticker": ticker, "Strategy Type": strategy, "Entry Watch Level": match["Opening Price"],
+                "Consolidation High": match["1H High"], "Consolidation Low": match["1H Low"],
+                "Crack Level": match["1H Low"], "Current Price": match["Current Price"],
+                "Volume Trend": "Strong RVOL" if match["Relative Volume"] > 1.5 else "Normal",
+                "Alert Status": status, "Notes": "Monitor only. No automatic trading.",
+            })
+        watch_df = pd.DataFrame(watch_rows)
+        if not watch_df.empty:
+            st.dataframe(format_short_table(watch_df), use_container_width=True, hide_index=True)
+            st.download_button("Export Watchlist CSV", watch_df.to_csv(index=False), "short_watchlist_monitor.csv", "text/csv")
+            chart_ticker = st.selectbox("Chart ticker", watch_df["Ticker"].tolist())
+            st.plotly_chart(short_strategy_chart(chart_ticker, rows), use_container_width=True)
+
+
 def page_market_overview(selected: list[str]) -> None:
     st.header("Market Overview")
     disclaimer()
@@ -2167,6 +2462,7 @@ def main() -> None:
         [
             "Market Overview",
             "Multi-Stock AI Scanner",
+            "Short Strategy Stock Scanner",
             "Options AI Scanner",
             "Individual Stock Analysis",
             "Technical Indicator Dashboard",
@@ -2189,6 +2485,8 @@ def main() -> None:
         page_market_overview(selected)
     elif page == "Multi-Stock AI Scanner":
         page_multi_stock_scanner(selected, allow_penny)
+    elif page == "Short Strategy Stock Scanner":
+        page_short_strategy_scanner(selected)
     elif page == "Options AI Scanner":
         page_options_ai_scanner(selected, allow_penny)
     elif page == "Individual Stock Analysis":
