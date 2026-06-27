@@ -93,6 +93,8 @@ Each record includes ticker, period, period start/end, price, period return, hig
 
 Daily technical snapshots are also included in Signal Accuracy Analysis as the source `Daily Technical Snapshot Journal`, so the Accuracy by Source table reflects all selected technical-dashboard stocks instead of only the manually recorded ticker.
 
+The Technical Indicator Dashboard also includes a Daily Calendar Archive target from June 26, 2026 through December 31, 2026. Use `Backfill missing calendar dates from 2026-06-26 to today` to create rows for every calendar date, including weekends. Weekend and market-closed rows use the latest available market bar and are marked in the `Market status` column.
+
 ## Recorded Signal Journal
 
 The Signal Accuracy Analysis page includes a Daily Signal Journal Recorder. It records today's selected stock signals into:

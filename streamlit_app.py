@@ -507,6 +507,8 @@ DAILY_EXCEL_DIR = APP_ROOT / "logs" / "daily_excel_reports"
 ARCHIVE_BACKUP_DIR = APP_ROOT / "logs" / "archive_backups"
 AUTO_DAILY_SOURCE = "Auto Top 50 Daily Scanner"
 RETENTION_DAYS = 365
+CALENDAR_ARCHIVE_START = pd.Timestamp("2026-06-26")
+CALENDAR_ARCHIVE_END = pd.Timestamp("2026-12-31")
 
 
 def app_secret(name: str, default: str = "") -> str:
@@ -837,11 +839,16 @@ def filter_history_range(records: pd.DataFrame, date_col: str, preset: str) -> p
     return output[output[date_col] >= start]
 
 
-def _period_slice(df: pd.DataFrame, period: str) -> pd.DataFrame:
+def _period_slice(df: pd.DataFrame, period: str, as_of: pd.Timestamp | None = None) -> pd.DataFrame:
     if df.empty:
         return df
     data = df.copy()
     data.index = pd.to_datetime(data.index)
+    if as_of is not None:
+        as_of = pd.Timestamp(as_of).normalize()
+        data = data[pd.to_datetime(data.index).normalize() <= as_of]
+        if data.empty:
+            return data
     last_day = pd.Timestamp(data.index.max()).normalize()
     if period == "Daily":
         return data.tail(1)
@@ -854,19 +861,28 @@ def _period_slice(df: pd.DataFrame, period: str) -> pd.DataFrame:
     return data[data.index >= start_day]
 
 
-def _technical_snapshot_row(ticker: str, analysis: dict, period: str) -> dict:
+def _technical_snapshot_row(ticker: str, analysis: dict, period: str, record_date: str | pd.Timestamp | None = None) -> dict:
+    record_day = pd.Timestamp(record_date).normalize() if record_date is not None else pd.Timestamp.now().normalize()
     df = analysis.get("Data", pd.DataFrame()).dropna()
-    window = _period_slice(df, period)
+    window = _period_slice(df, period, as_of=record_day)
     if window.empty:
         raise ValueError("No technical data available")
     latest = window.iloc[-1]
+    latest_market_day = pd.Timestamp(window.index.max()).normalize()
     first_close = float(window["Close"].iloc[0])
     last_close = float(window["Close"].iloc[-1])
     period_return = ((last_close / first_close) - 1) * 100 if first_close else 0
+    market_status = "Trading day"
+    if record_day.weekday() >= 5:
+        market_status = "Weekend / market closed"
+    elif latest_market_day < record_day:
+        market_status = "Market closed / no new bar"
     return {
-        "Record date": pd.Timestamp.now().date().isoformat(),
+        "Record date": record_day.date().isoformat(),
         "Recorded at": datetime.utcnow().isoformat(),
         "Source": "Technical Indicator Dashboard",
+        "Market status": market_status,
+        "Latest market date": latest_market_day.date().isoformat(),
         "Period": period,
         "Period start": pd.Timestamp(window.index.min()).date().isoformat(),
         "Period end": pd.Timestamp(window.index.max()).date().isoformat(),
@@ -892,10 +908,11 @@ def _technical_snapshot_row(ticker: str, analysis: dict, period: str) -> dict:
     }
 
 
-def record_technical_snapshots(tickers: list[str], periods: list[str]) -> tuple[pd.DataFrame, list[str]]:
+def record_technical_snapshots(tickers: list[str], periods: list[str], record_date: str | pd.Timestamp | None = None) -> tuple[pd.DataFrame, list[str]]:
     rows = []
     errors = []
-    today = pd.Timestamp.now().date().isoformat()
+    record_day = pd.Timestamp(record_date).normalize() if record_date is not None else pd.Timestamp.now().normalize()
+    today = record_day.date().isoformat()
     clean_tickers = normalize_tickers(tickers)
     clean_periods = [period for period in periods if period in {"Daily", "Weekly", "Monthly"}]
     for ticker in clean_tickers:
@@ -905,7 +922,7 @@ def record_technical_snapshots(tickers: list[str], periods: list[str]) -> tuple[
                 errors.append(f"{ticker}: {analysis['Error']}")
                 continue
             for period in clean_periods:
-                rows.append(_technical_snapshot_row(ticker, analysis, period))
+                rows.append(_technical_snapshot_row(ticker, analysis, period, record_date=record_day))
         except Exception as exc:
             errors.append(f"{ticker}: {exc}")
     records = pd.DataFrame(rows)
@@ -934,6 +951,45 @@ def load_technical_snapshots() -> pd.DataFrame:
     if not TECHNICAL_SNAPSHOT_FILE.exists():
         return pd.DataFrame()
     return pd.read_csv(TECHNICAL_SNAPSHOT_FILE)
+
+
+def calendar_archive_dates(end_date: pd.Timestamp | None = None) -> list[str]:
+    end = pd.Timestamp(end_date).normalize() if end_date is not None else pd.Timestamp.now().normalize()
+    end = min(end, CALENDAR_ARCHIVE_END)
+    if end < CALENDAR_ARCHIVE_START:
+        return []
+    return [date.date().isoformat() for date in pd.date_range(CALENDAR_ARCHIVE_START, end, freq="D")]
+
+
+def missing_calendar_dates(history: pd.DataFrame, tickers: list[str] | None = None) -> list[str]:
+    expected = set(calendar_archive_dates())
+    if history.empty or "Record date" not in history:
+        return sorted(expected)
+    daily = history[history.get("Period", pd.Series(dtype=str)).astype(str) == "Daily"].copy()
+    daily["Record date"] = pd.to_datetime(daily["Record date"], errors="coerce").dt.date.astype(str)
+    if tickers:
+        clean_tickers = set(normalize_tickers(tickers))
+        complete_dates = set()
+        for date, group in daily.groupby("Record date"):
+            saved_tickers = set(group["Ticker"].astype(str))
+            if clean_tickers.issubset(saved_tickers):
+                complete_dates.add(date)
+        return sorted(expected - complete_dates)
+    saved = set(daily["Record date"].dropna().astype(str))
+    return sorted(expected - saved)
+
+
+def backfill_calendar_technical_snapshots(tickers: list[str], dates: list[str]) -> tuple[pd.DataFrame, list[str]]:
+    all_rows = []
+    all_errors = []
+    for date in dates:
+        rows, errors = record_technical_snapshots(tickers, ["Daily"], record_date=date)
+        if not rows.empty:
+            all_rows.append(rows)
+        all_errors.extend(errors)
+    if all_rows:
+        return pd.concat(all_rows, ignore_index=True), all_errors
+    return pd.DataFrame(), all_errors
 
 
 def technical_snapshots_to_signal_records(snapshots: pd.DataFrame) -> pd.DataFrame:
@@ -1570,6 +1626,44 @@ def page_technical_dashboard(selected: list[str]) -> None:
                 st.warning("Some tickers could not be recorded: " + "; ".join(errors[:8]))
 
     history = load_technical_snapshots()
+    st.subheader("Daily Calendar Archive")
+    st.caption("Target: every calendar date from 2026-06-26 through 2026-12-31, including weekends. Weekend rows use the latest available market data and are marked as market closed.")
+    calendar_tickers = st.multiselect("Calendar archive tickers", available, default=available[:50])
+    calendar_history = load_technical_snapshots()
+    missing_dates = missing_calendar_dates(calendar_history, calendar_tickers[:50])
+    expected_dates = calendar_archive_dates()
+    cc1, cc2, cc3 = st.columns(3)
+    cc1.metric("Expected calendar dates", len(expected_dates))
+    cc2.metric("Saved calendar dates", max(0, len(expected_dates) - len(missing_dates)))
+    cc3.metric("Missing calendar dates", len(missing_dates))
+    auto_calendar = st.checkbox("Auto save today's calendar technical row", value=True)
+    today_iso = pd.Timestamp.now().date().isoformat()
+    if auto_calendar and today_iso in missing_dates and calendar_tickers:
+        with st.spinner("Saving today's calendar technical rows..."):
+            saved_rows, errors = record_technical_snapshots(calendar_tickers[:50], ["Daily"], record_date=today_iso)
+        if not saved_rows.empty:
+            st.success(f"Saved today's calendar archive rows: {len(saved_rows)}.")
+        if errors:
+            st.warning("Some calendar rows could not be saved: " + "; ".join(errors[:8]))
+        history = load_technical_snapshots()
+        missing_dates = missing_calendar_dates(history, calendar_tickers[:50])
+    if st.button("Backfill missing calendar dates from 2026-06-26 to today"):
+        if not calendar_tickers:
+            st.warning("Select at least one ticker for the calendar archive.")
+        elif not missing_dates:
+            st.success("No missing calendar dates to backfill.")
+        else:
+            with st.spinner(f"Backfilling {len(missing_dates)} calendar date(s) for up to 50 tickers..."):
+                filled_rows, errors = backfill_calendar_technical_snapshots(calendar_tickers[:50], missing_dates)
+            if not filled_rows.empty:
+                st.success(f"Backfilled {len(filled_rows)} technical calendar rows.")
+            if errors:
+                st.warning("Some calendar rows could not be saved: " + "; ".join(errors[:8]))
+            history = load_technical_snapshots()
+            missing_dates = missing_calendar_dates(history, calendar_tickers[:50])
+    if missing_dates:
+        st.caption("Missing dates: " + ", ".join(missing_dates[:20]) + ("..." if len(missing_dates) > 20 else ""))
+
     if not history.empty:
         st.subheader("Technical Snapshot Journal")
         c1, c2, c3 = st.columns(3)
@@ -1588,12 +1682,14 @@ def page_technical_dashboard(selected: list[str]) -> None:
         if shown.empty:
             st.info("No technical snapshot rows match the selected filters.")
             return
-        shown = shown.sort_values(["Record date", "Period", "Ticker"], ascending=[False, True, True]).head(300)
+        shown = shown.sort_values(["Record date", "Period", "Ticker"], ascending=[False, True, True])
+        row_limit = st.selectbox("Rows to display", [300, 1000, 5000, "All"], index=1)
+        display_rows = shown if row_limit == "All" else shown.head(int(row_limit))
         m1, m2, m3 = st.columns(3)
         m1.metric("Archived rows", f"{len(shown):,}")
         m2.metric("Archived dates", shown["Record date"].astype(str).nunique())
         m3.metric("Archived tickers", shown["Ticker"].astype(str).nunique() if "Ticker" in shown else 0)
-        st.dataframe(shown, use_container_width=True, hide_index=True)
+        st.dataframe(display_rows, use_container_width=True, hide_index=True)
         st.download_button(
             "Download technical snapshot journal",
             shown.to_csv(index=False).encode("utf-8"),
