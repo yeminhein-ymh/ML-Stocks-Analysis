@@ -1461,11 +1461,22 @@ def render_scanner_history_reference() -> None:
 
 
 def price_chart(df: pd.DataFrame, ticker: str) -> go.Figure:
+    df = df.copy()
+    if "EMA_20" not in df and "Close" in df:
+        df["EMA_20"] = df["Close"].ewm(span=20, adjust=False).mean()
+    if "EMA_50" not in df and "Close" in df:
+        df["EMA_50"] = df["Close"].ewm(span=50, adjust=False).mean()
+    if "VWAP" not in df and {"High", "Low", "Close", "Volume"}.issubset(df.columns):
+        typical = (df["High"] + df["Low"] + df["Close"]) / 3
+        df["VWAP"] = (typical * df["Volume"]).cumsum() / df["Volume"].replace(0, pd.NA).cumsum()
     fig = go.Figure()
     fig.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"], name=ticker))
-    fig.add_trace(go.Scatter(x=df.index, y=df["EMA_20"], name="EMA 20", line=dict(width=1.5)))
-    fig.add_trace(go.Scatter(x=df.index, y=df["EMA_50"], name="EMA 50", line=dict(width=1.5)))
-    fig.add_trace(go.Scatter(x=df.index, y=df["VWAP"], name="VWAP", line=dict(width=1.2, dash="dot")))
+    if "EMA_20" in df:
+        fig.add_trace(go.Scatter(x=df.index, y=df["EMA_20"], name="EMA 20", line=dict(width=1.5)))
+    if "EMA_50" in df:
+        fig.add_trace(go.Scatter(x=df.index, y=df["EMA_50"], name="EMA 50", line=dict(width=1.5)))
+    if "VWAP" in df:
+        fig.add_trace(go.Scatter(x=df.index, y=df["VWAP"], name="VWAP", line=dict(width=1.2, dash="dot")))
     fig.update_layout(height=520, margin=dict(l=10, r=10, t=35, b=10), xaxis_rangeslider_visible=False)
     return fig
 
