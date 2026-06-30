@@ -18,6 +18,7 @@ Streamlit dashboard and paper-trading bot for universal multi-stock analysis acr
 - Short Strategy Stock Scanner for educational low-float short setup research: Gap Up Short, Bounce Short, First Red Day, and Watchlist Monitor.
 - Options Paper Trading page for paper limit orders on selected or manually entered option contracts.
 - Suitability gate before AI signals.
+- Individual Stock Analysis includes EMA 20, EMA 60, EMA 250, Daily Session VWAP, Anchored VWAP, and renamed Cumulative VWAP.
 - Random Forest and optional XGBoost training with time-series splits.
 - Individual and portfolio backtesting with cost and slippage.
 - Alpaca paper-trading helpers only. No live trading implementation.

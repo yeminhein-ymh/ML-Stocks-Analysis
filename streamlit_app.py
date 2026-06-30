@@ -35,7 +35,7 @@ if not USING_EMBEDDED_FALLBACK:
         from app.core.analyzer import analyze_stock, prepare_stock, scan_stocks
         from app.core.backtesting import backtest_portfolio, backtest_signal_strategy
         from app.core.config import DEFAULT_WATCHLIST, RISK_RULES, SIGNAL_LOG_FILE, TRADE_LOG_FILE
-        from app.core.data import fetch_last_prices, market_data_healthcheck, normalize_tickers
+        from app.core.data import fetch_history, fetch_last_prices, market_data_healthcheck, normalize_tickers
         from app.core.modeling import train_models
         from app.core.paper_trading import cancel_option_order, cancel_order, log_signal, open_option_orders_table, open_orders_table, option_order_requirement, place_option_paper_order, place_paper_order, position_size
         from app.core.screener import COMMON_UNIVERSE, screen_universe
@@ -192,6 +192,8 @@ if USING_EMBEDDED_FALLBACK:
         out["EMA_9"] = out["Close"].ewm(span=9, adjust=False).mean()
         out["EMA_20"] = out["Close"].ewm(span=20, adjust=False).mean()
         out["EMA_50"] = out["Close"].ewm(span=50, adjust=False).mean()
+        out["EMA_60"] = out["Close"].ewm(span=60, adjust=False).mean()
+        out["EMA_250"] = out["Close"].ewm(span=250, adjust=False).mean()
         out["RSI"] = _rsi(out["Close"])
         ema_12 = out["Close"].ewm(span=12, adjust=False).mean()
         ema_26 = out["Close"].ewm(span=26, adjust=False).mean()
@@ -206,6 +208,7 @@ if USING_EMBEDDED_FALLBACK:
         out["ATR_Pct"] = out["ATR"] / out["Close"] * 100
         typical = (out["High"] + out["Low"] + out["Close"]) / 3
         out["VWAP"] = (typical * out["Volume"]).cumsum() / out["Volume"].replace(0, np.nan).cumsum()
+        out["Cumulative_VWAP"] = out["VWAP"]
         out["Avg_Volume_20"] = out["Volume"].rolling(20).mean()
         out["Volume_Ratio"] = out["Volume"] / out["Avg_Volume_20"]
         out["Dollar_Volume_20"] = (out["Close"] * out["Volume"]).rolling(20).mean()
@@ -1481,6 +1484,69 @@ def price_chart(df: pd.DataFrame, ticker: str) -> go.Figure:
     return fig
 
 
+def add_vwap_column(df: pd.DataFrame, column_name: str = "VWAP") -> pd.DataFrame:
+    out = df.copy()
+    if out.empty or not {"High", "Low", "Close", "Volume"}.issubset(out.columns):
+        return out
+    typical = (out["High"] + out["Low"] + out["Close"]) / 3
+    volume = pd.to_numeric(out["Volume"], errors="coerce").fillna(0)
+    out[column_name] = (typical * volume).cumsum() / volume.replace(0, float("nan")).cumsum()
+    return out
+
+
+def session_vwap_frame(ticker: str) -> pd.DataFrame:
+    try:
+        intraday = fetch_history(ticker, period="1d", interval="5m")
+    except Exception:
+        intraday = pd.DataFrame()
+    if intraday.empty:
+        return intraday
+    return add_vwap_column(intraday, "Session_VWAP")
+
+
+def anchored_vwap_series(df: pd.DataFrame, anchor_date: pd.Timestamp) -> tuple[pd.Series, pd.Timestamp | None]:
+    if df.empty:
+        return pd.Series(dtype=float), None
+    data = df.copy()
+    data.index = pd.to_datetime(data.index)
+    anchor_date = pd.Timestamp(anchor_date).normalize()
+    anchored = data[pd.to_datetime(data.index).normalize() >= anchor_date].copy()
+    if anchored.empty:
+        anchored = data.tail(1).copy()
+    anchored = add_vwap_column(anchored, "Anchored_VWAP")
+    return anchored["Anchored_VWAP"], pd.Timestamp(anchored.index.min()).normalize()
+
+
+def individual_analysis_chart(
+    df: pd.DataFrame,
+    ticker: str,
+    session_vwap_value: float | None,
+    anchored_vwap: pd.Series,
+) -> go.Figure:
+    data = df.copy()
+    for span in [20, 60, 250]:
+        col = f"EMA_{span}"
+        if col not in data and "Close" in data:
+            data[col] = data["Close"].ewm(span=span, adjust=False).mean()
+    if "Cumulative_VWAP" not in data:
+        if "VWAP" in data:
+            data["Cumulative_VWAP"] = data["VWAP"]
+        else:
+            data = add_vwap_column(data, "Cumulative_VWAP")
+    fig = go.Figure()
+    fig.add_trace(go.Candlestick(x=data.index, open=data["Open"], high=data["High"], low=data["Low"], close=data["Close"], name=ticker))
+    fig.add_trace(go.Scatter(x=data.index, y=data["EMA_20"], name="EMA 20", line=dict(width=1.3)))
+    fig.add_trace(go.Scatter(x=data.index, y=data["EMA_60"], name="EMA 60", line=dict(width=1.3)))
+    fig.add_trace(go.Scatter(x=data.index, y=data["EMA_250"], name="EMA 250", line=dict(width=1.4)))
+    fig.add_trace(go.Scatter(x=data.index, y=data["Cumulative_VWAP"], name="Cumulative VWAP", line=dict(width=1.2, dash="dot")))
+    if not anchored_vwap.empty:
+        fig.add_trace(go.Scatter(x=anchored_vwap.index, y=anchored_vwap, name="Anchored VWAP", line=dict(width=2)))
+    if session_vwap_value is not None and pd.notna(session_vwap_value):
+        fig.add_hline(y=session_vwap_value, line_dash="dash", annotation_text="Daily Session VWAP")
+    fig.update_layout(height=560, margin=dict(l=10, r=10, t=35, b=10), xaxis_rangeslider_visible=False)
+    return fig
+
+
 SHORT_DEFAULT_UNIVERSE = [
     "SOUN", "OPEN", "RGTI", "BBAI", "IONQ", "QUBT", "LUNR", "ACHR", "JOBY", "SERV",
     "WULF", "RIOT", "MARA", "HUT", "BTDR", "CIFR", "LAZR", "OUST", "RKLB", "ASTS",
@@ -1876,7 +1942,40 @@ def page_individual_analysis(selected: list[str], allow_penny: bool) -> None:
     cols[3].metric("Bearish Probability", f"{ai['bearish_probability']:.1f}%")
     cols[4].metric("Final Signal", result["Final signal"])
     st.write("Suitability check:", result["Suitability reasons"])
-    st.plotly_chart(price_chart(result["Data"].tail(252), ticker), use_container_width=True)
+    df = result["Data"].copy()
+    latest = df.dropna().iloc[-1]
+    session_frame = session_vwap_frame(ticker)
+    session_vwap_value = None
+    if not session_frame.empty and "Session_VWAP" in session_frame:
+        session_vwap_value = float(session_frame["Session_VWAP"].dropna().iloc[-1])
+    anchor_mode = st.selectbox("Anchored VWAP anchor", ["Year start", "Swing low", "Earnings/manual date"])
+    if anchor_mode == "Year start":
+        anchor_date = pd.Timestamp.now().replace(month=1, day=1)
+    elif anchor_mode == "Swing low":
+        clean = df.dropna(subset=["Low"])
+        anchor_date = pd.Timestamp(clean["Low"].tail(252).idxmin()) if not clean.empty else pd.Timestamp.now()
+    else:
+        anchor_date = pd.Timestamp(
+            st.date_input(
+                "Earnings/manual anchor date",
+                value=(pd.Timestamp.now() - pd.Timedelta(days=90)).date(),
+            )
+        )
+    anchored_vwap, actual_anchor = anchored_vwap_series(df, anchor_date)
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("EMA 20", f"${latest.get('EMA_20', 0):.2f}")
+    c2.metric("EMA 60", f"${latest.get('EMA_60', 0):.2f}")
+    c3.metric("EMA 250", f"${latest.get('EMA_250', 0):.2f}")
+    c4.metric("Daily Session VWAP", f"${session_vwap_value:.2f}" if session_vwap_value is not None else "Unavailable")
+    c5.metric("Anchored VWAP", f"${anchored_vwap.dropna().iloc[-1]:.2f}" if not anchored_vwap.dropna().empty else "Unavailable")
+    st.caption(
+        "The old daily cumulative VWAP is shown as Cumulative VWAP. Daily Session VWAP uses intraday bars when the data provider returns them."
+        + (f" Anchored VWAP start: {actual_anchor.date().isoformat()}." if actual_anchor is not None else "")
+    )
+    st.plotly_chart(individual_analysis_chart(df.tail(300), ticker, session_vwap_value, anchored_vwap), use_container_width=True)
+    if not session_frame.empty:
+        with st.expander("Intraday session VWAP data"):
+            st.dataframe(session_frame.tail(120), use_container_width=True)
 
 
 def page_technical_dashboard(selected: list[str]) -> None:
