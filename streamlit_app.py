@@ -665,6 +665,39 @@ def signal_direction(signal: str) -> str:
     return "Neutral"
 
 
+def signal_synergy_mask(rows: pd.DataFrame) -> pd.Series:
+    if rows.empty:
+        return pd.Series(dtype=bool, index=rows.index)
+    rsi = pd.to_numeric(rows.get("RSI", pd.Series(index=rows.index, dtype=float)), errors="coerce")
+    macd = rows.get("MACD signal", pd.Series(index=rows.index, dtype=str)).astype(str)
+    vwap = rows.get("VWAP status", pd.Series(index=rows.index, dtype=str)).astype(str)
+    final_signal = rows.get("Final signal", pd.Series(index=rows.index, dtype=str)).astype(str)
+    return (
+        final_signal.eq("Strong Buy")
+        & rsi.between(60, 75, inclusive="both")
+        & macd.str.contains("Bullish", case=False, na=False)
+        & vwap.str.contains("Above", case=False, na=False)
+    )
+
+
+def add_signal_synergy_columns(rows: pd.DataFrame) -> pd.DataFrame:
+    if rows.empty:
+        return rows
+    output = rows.copy()
+    output["Synergy Strong Buy"] = signal_synergy_mask(output)
+    bullish_prob = pd.to_numeric(output.get("AI bullish probability", pd.Series(index=output.index, dtype=float)), errors="coerce")
+    output["AI conviction band"] = pd.cut(
+        bullish_prob,
+        bins=[-1, 60, 70, 82.5, 90, 100],
+        labels=["Low", "Watch", "Conviction", "Strong Buy sweet spot", "Very high"],
+    ).astype("object")
+    output["Signal quality note"] = ""
+    weak_buy = output.get("Final signal", pd.Series(index=output.index, dtype=str)).astype(str).eq("Buy") & (bullish_prob < 70)
+    output.loc[weak_buy, "Signal quality note"] = "Buy signal but AI probability is below 70%"
+    output.loc[output["Synergy Strong Buy"], "Signal quality note"] = "RSI/MACD/VWAP synergy confirmed"
+    return output
+
+
 def apply_retention(records: pd.DataFrame, date_col: str, days: int = RETENTION_DAYS) -> pd.DataFrame:
     if records.empty or date_col not in records:
         return records
@@ -1422,7 +1455,23 @@ def format_scan_table(df: pd.DataFrame) -> pd.io.formats.style.Styler:
         "Risk-reward ratio": "{:.2f}",
         "Suitability score": "{:.0f}",
     }
-    return df.style.format({k: v for k, v in numeric_cols.items() if k in df.columns})
+    styler = df.style.format({k: v for k, v in numeric_cols.items() if k in df.columns})
+
+    def highlight_conviction(row: pd.Series) -> list[str]:
+        styles = [""] * len(row)
+        bullish = pd.to_numeric(row.get("AI bullish probability"), errors="coerce")
+        is_synergy = bool(row.get("Synergy Strong Buy", False))
+        note = str(row.get("Signal quality note", ""))
+        for idx, col in enumerate(row.index):
+            if col == "AI bullish probability" and pd.notna(bullish) and 82.5 <= float(bullish) <= 90:
+                styles[idx] = "background-color: #e7f7ef; color: #126b3f; font-weight: 700;"
+            if col == "Synergy Strong Buy" and is_synergy:
+                styles[idx] = "background-color: #dff5ff; color: #075985; font-weight: 700;"
+            if col == "Signal quality note" and note:
+                styles[idx] = "background-color: #fff7d6; color: #7a4b00; font-weight: 600;"
+        return styles
+
+    return styler.apply(highlight_conviction, axis=1)
 
 
 def render_scanner_history_reference() -> None:
@@ -1861,6 +1910,18 @@ def page_multi_stock_scanner(selected: list[str], allow_penny: bool) -> pd.DataF
     scan_size = st.select_slider("Scan size", options=[5, 10, 20, 50, 100], value=50)
     universe = scanner_universe(selected, scan_size)
     st.caption(f"Ready to scan {len(universe)} stocks. Selected symbols are prioritized, then the built-in liquid-stock universe fills the rest.")
+    f1, f2, f3 = st.columns(3)
+    high_conviction_only = f1.toggle(
+        "High Conviction Only",
+        value=False,
+        help="Shows only Strong Buy rows where RSI is 60-75, MACD is Bullish, and price is Above VWAP.",
+    )
+    hide_weak_buys = f2.toggle(
+        "Skip Buy below 70% AI",
+        value=True,
+        help="Hides Buy rows when AI bullish probability is below 70%.",
+    )
+    ai_sort = f3.toggle("Sort by AI conviction", value=True)
     record_run = st.checkbox("Record this scanner run for signal accuracy analysis", value=True)
     archive_run = st.checkbox("Save full scanner table to daily one-year reference archive", value=True)
     run = st.button("Run scanner", type="primary")
@@ -1874,16 +1935,36 @@ def page_multi_stock_scanner(selected: list[str], allow_penny: bool) -> pd.DataF
         st.warning("No scan results were available.")
         render_scanner_history_reference()
         return table
-    st.dataframe(format_scan_table(table), use_container_width=True, hide_index=True)
+    table = add_signal_synergy_columns(table)
+    display_table = table.copy()
+    weak_buy_mask = display_table["Signal quality note"].astype(str).str.contains("below 70", case=False, na=False)
+    weak_buy_count = int(weak_buy_mask.sum())
+    if hide_weak_buys:
+        display_table = display_table[~weak_buy_mask].copy()
+    if high_conviction_only:
+        display_table = display_table[display_table["Synergy Strong Buy"]].copy()
+    if ai_sort and "AI bullish probability" in display_table:
+        display_table = display_table.sort_values(["AI bullish probability", "Suitability score"], ascending=False)
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Scanned", len(table))
+    m2.metric("Displayed", len(display_table))
+    m3.metric("Synergy Strong Buys", int(table["Synergy Strong Buy"].sum()))
+    m4.metric("Buy below 70% AI", weak_buy_count)
+    if weak_buy_count:
+        st.warning(f"{weak_buy_count} Buy signal(s) have AI bullish probability below 70%. Keep the skip toggle enabled to hide lower-conviction buys.")
+    if display_table.empty:
+        st.info("No rows match the current scanner filters.")
+    else:
+        st.dataframe(format_scan_table(display_table), use_container_width=True, hide_index=True)
     if record_run:
-        saved = record_daily_rows(table, "Multi-Stock AI Scanner")
+        saved = record_daily_rows(display_table if not display_table.empty else table, "Multi-Stock AI Scanner")
         st.success(f"Recorded {saved} scanner signal(s) for today's analysis journal.")
     if archive_run:
         archived = record_scanner_history(table, scan_size)
         st.success(f"Saved {archived} scanner row(s) to the daily reference archive.")
-    st.download_button("Download scanner results", table.to_csv(index=False), "scanner_results.csv", "text/csv")
+    st.download_button("Download scanner results", display_table.to_csv(index=False), "scanner_results.csv", "text/csv")
     render_scanner_history_reference()
-    return table
+    return display_table
 
 
 def page_options_ai_scanner(selected: list[str], allow_penny: bool) -> None:
@@ -1976,6 +2057,65 @@ def page_individual_analysis(selected: list[str], allow_penny: bool) -> None:
     if not session_frame.empty:
         with st.expander("Intraday session VWAP data"):
             st.dataframe(session_frame.tail(120), use_container_width=True)
+
+
+def render_sector_divergence_panel(history: pd.DataFrame) -> None:
+    if history.empty or "Ticker" not in history:
+        return
+    semiconductors = ["AMAT", "SNDK", "INTC"]
+    software_consumer = ["AAPL", "ABBV"]
+    data = history.copy()
+    data["Record date"] = pd.to_datetime(data["Record date"], errors="coerce")
+    if "Period" in data:
+        data = data[data["Period"].astype(str) == "Daily"].copy()
+    data = data[data["Ticker"].astype(str).isin([*semiconductors, *software_consumer])]
+    if data.empty:
+        st.info("Sector divergence needs saved Daily rows for AMAT, SNDK, INTC, AAPL, and ABBV.")
+        return
+    latest_date = data["Record date"].max()
+    latest = data[data["Record date"] == latest_date].copy()
+    latest["Group"] = latest["Ticker"].map(lambda ticker: "Semiconductors" if ticker in semiconductors else "Software / Consumer Tech")
+    macd_series = latest.get("MACD signal", pd.Series(index=latest.index, dtype=str)).astype(str)
+    trend_series = latest.get("Trend", pd.Series(index=latest.index, dtype=str)).astype(str)
+    latest["MACD bearish"] = macd_series.str.contains("Bearish", case=False, na=False)
+    latest["MACD bullish"] = macd_series.str.contains("Bullish", case=False, na=False)
+    latest["Downtrend"] = trend_series.str.contains("Downtrend", case=False, na=False)
+    latest["Uptrend"] = trend_series.str.contains("Uptrend", case=False, na=False)
+    summary = (
+        latest.groupby("Group")
+        .agg(
+            Tickers=("Ticker", "count"),
+            Bearish_MACD=("MACD bearish", "mean"),
+            Bullish_MACD=("MACD bullish", "mean"),
+            Downtrend=("Downtrend", "mean"),
+            Uptrend=("Uptrend", "mean"),
+            Avg_AI_Bullish=("AI bullish probability", "mean"),
+        )
+        .reset_index()
+    )
+    st.subheader("Sector Divergence")
+    st.caption("Compares Semiconductor tickers AMAT/SNDK/INTC against Software/Consumer Tech tickers AAPL/ABBV using the latest saved Daily technical snapshots.")
+    st.dataframe(
+        summary.style.format(
+            {
+                "Bearish_MACD": "{:.0%}",
+                "Bullish_MACD": "{:.0%}",
+                "Downtrend": "{:.0%}",
+                "Uptrend": "{:.0%}",
+                "Avg_AI_Bullish": "{:.1f}%",
+            }
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+    semi = summary[summary["Group"] == "Semiconductors"]
+    software = summary[summary["Group"] == "Software / Consumer Tech"]
+    if not semi.empty and not software.empty:
+        semi_bearish = float(semi["Bearish_MACD"].iloc[0]) >= 0.5 and float(semi["Downtrend"].iloc[0]) >= 0.5
+        software_bullish = float(software["Bullish_MACD"].iloc[0]) >= 0.5 and float(software["Uptrend"].iloc[0]) >= 0.5
+        if semi_bearish and software_bullish:
+            st.warning("Divergence alert: Semiconductors are mostly Bearish/Downtrend while Software/Consumer Tech remains Bullish/Uptrend. Treat semiconductor Buy signals as dip buys that need confirmation.")
+    st.dataframe(latest[["Record date", "Group", "Ticker", "MACD signal", "Trend", "VWAP status", "Final signal", "AI bullish probability"]], use_container_width=True, hide_index=True)
 
 
 def page_technical_dashboard(selected: list[str]) -> None:
@@ -2088,6 +2228,7 @@ def page_technical_dashboard(selected: list[str]) -> None:
             st.info("No technical snapshot rows match the selected filters.")
             return
         shown = shown.sort_values(["Record date", "Period", "Ticker"], ascending=[False, True, True])
+        render_sector_divergence_panel(shown)
         row_limit = st.selectbox("Rows to display", [300, 1000, 5000, "All"], index=1)
         display_rows = shown if row_limit == "All" else shown.head(int(row_limit))
         m1, m2, m3 = st.columns(3)
@@ -2337,10 +2478,43 @@ def page_risk_management() -> None:
             ]
         )
     )
-    entry = st.number_input("Entry price", value=100.0)
-    stop = st.number_input("Stop loss", value=95.0)
-    capital = st.number_input("Capital", value=25000.0)
-    st.metric("Position size", f"{position_size(capital, entry, stop)} shares")
+    st.subheader("ATR-Based Stop / Target Calculator")
+    c1, c2, c3, c4 = st.columns(4)
+    ticker = c1.selectbox("Load ticker ATR", scanner_universe([], 50), index=0)
+    use_live_atr = c2.toggle("Use latest ATR %", value=True)
+    reward_ratio = c3.number_input("Reward:risk ratio", min_value=1.0, max_value=5.0, value=2.0, step=0.25)
+    lock_ratio = c4.toggle("2.0 ratio lock", value=True)
+    if lock_ratio:
+        reward_ratio = 2.0
+    analysis = analyze_stock(ticker)
+    latest_atr_pct = None
+    latest_price = 100.0
+    if "Error" not in analysis:
+        latest_price = float(analysis.get("Price", latest_price))
+        df = analysis.get("Data", pd.DataFrame()).dropna()
+        if not df.empty:
+            latest_atr_pct = float(df.iloc[-1].get("ATR_Pct", 0))
+    r1, r2, r3 = st.columns(3)
+    entry = r1.number_input("Entry price", min_value=0.01, value=round(latest_price, 2), step=0.01)
+    manual_atr_pct = r2.number_input("ATR %", min_value=0.1, max_value=50.0, value=round(latest_atr_pct or 4.3, 2), step=0.1)
+    capital = r3.number_input("Capital", min_value=1000.0, value=25000.0, step=1000.0)
+    atr_pct = latest_atr_pct if use_live_atr and latest_atr_pct is not None else manual_atr_pct
+    risk_per_share = entry * (atr_pct / 100)
+    stop = max(0.01, entry - risk_per_share)
+    target = entry + (risk_per_share * reward_ratio)
+    stop_loss_pct = ((entry - stop) / entry) * 100 if entry else 0
+    target_gain_pct = (target / entry - 1) * 100 if entry else 0
+    calc = pd.DataFrame(
+        [
+            {"Metric": "ATR % used", "Value": f"{atr_pct:.2f}%"},
+            {"Metric": "Stop loss", "Value": f"${stop:.2f} ({stop_loss_pct:.2f}% risk)"},
+            {"Metric": "Take profit", "Value": f"${target:.2f} ({target_gain_pct:.2f}% target)"},
+            {"Metric": "Reward:risk", "Value": f"1:{reward_ratio:.2f}"},
+            {"Metric": "Position size", "Value": f"{position_size(capital, entry, stop)} shares"},
+        ]
+    )
+    st.dataframe(calc, use_container_width=True, hide_index=True)
+    st.caption("The default keeps the target gain at roughly double the ATR-based risk, matching a 2.0 reward:risk profile.")
 
 
 def page_portfolio_allocation(selected: list[str], allow_penny: bool) -> None:
@@ -2539,6 +2713,53 @@ def page_signal_accuracy_analysis(selected: list[str], allow_penny: bool) -> Non
         )
         st.subheader("Accuracy by Final Signal")
         st.dataframe(by_signal.style.format({"Accuracy": "{:.1%}", "Avg_Return": "{:.2f}%"}), use_container_width=True, hide_index=True)
+        comparison_rows = []
+        strong_buy_rows = evaluated_done[evaluated_done["Final signal"].astype(str) == "Strong Buy"].copy()
+        if not strong_buy_rows.empty:
+            synergy_rows = add_signal_synergy_columns(strong_buy_rows)
+            comparison_rows.append(
+                {
+                    "Strategy": "Standard Strong Buy",
+                    "Signals": len(strong_buy_rows),
+                    "Correct": int(strong_buy_rows["Correct"].sum()),
+                    "Accuracy": strong_buy_rows["Correct"].mean(),
+                    "Avg_Return": strong_buy_rows["Realized return %"].mean(),
+                }
+            )
+            synergy_only = synergy_rows[synergy_rows["Synergy Strong Buy"]].copy()
+            if not synergy_only.empty:
+                comparison_rows.append(
+                    {
+                        "Strategy": "Synergy Strong Buy",
+                        "Signals": len(synergy_only),
+                        "Correct": int(synergy_only["Correct"].sum()),
+                        "Accuracy": synergy_only["Correct"].mean(),
+                        "Avg_Return": synergy_only["Realized return %"].mean(),
+                    }
+                )
+        hold_rows = evaluated_done[evaluated_done["Final signal"].astype(str) == "Hold"].copy()
+        if not hold_rows.empty:
+            trend_text = hold_rows.get("Trend", pd.Series(index=hold_rows.index, dtype=str)).astype(str)
+            vwap_text = hold_rows.get("VWAP status", pd.Series(index=hold_rows.index, dtype=str)).astype(str)
+            support_holds = hold_rows[
+                vwap_text.str.contains("Above", case=False, na=False)
+                & trend_text.str.contains("Downtrend|Sideways", case=False, na=False, regex=True)
+            ].copy()
+            if not support_holds.empty:
+                comparison_rows.append(
+                    {
+                        "Strategy": "Hold support validation",
+                        "Signals": len(support_holds),
+                        "Correct": int(support_holds["Correct"].sum()),
+                        "Accuracy": support_holds["Correct"].mean(),
+                        "Avg_Return": support_holds["Realized return %"].mean(),
+                    }
+                )
+        if comparison_rows:
+            strategy_comparison = pd.DataFrame(comparison_rows)
+            st.subheader("Strategy Comparison")
+            st.caption("Compares normal Strong Buy rows against Synergy Strong Buy rows where RSI, MACD, and VWAP are aligned. Hold support validation checks Hold rows that are Above VWAP but still Downtrend/Sideways.")
+            st.dataframe(strategy_comparison.style.format({"Accuracy": "{:.1%}", "Avg_Return": "{:.2f}%"}), use_container_width=True, hide_index=True)
         by_source = (
             evaluated_done.groupby("Source")
             .agg(Signals=("Ticker", "count"), Accuracy=("Correct", "mean"), Avg_Return=("Realized return %", "mean"))

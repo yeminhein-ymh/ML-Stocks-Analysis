@@ -9,11 +9,13 @@ Streamlit dashboard and paper-trading bot for universal multi-stock analysis acr
 - Default watchlist: NVDA, AMZN, META, GOOGL, PLTR, MU, SNDK, NBIS, AAPL, MSFT, TSLA, AMD, AVGO, SMCI, NFLX, ARM, TSM, ORCL, CRM, QCOM, INTC, COIN, MSTR, SOFI, HOOD, JPM, BAC, XOM, NEE, ENPH, FSLR.
 - CSV watchlist upload and saved custom watchlists.
 - Stock screener for formula suitability.
+- Signal Synergy filters on the Multi-Stock AI Scanner: High Conviction Only, Buy-below-70% AI warning, and AI conviction highlighting.
 - Daily signal journal for scanner and technical-indicator snapshots.
 - Daily, weekly, and monthly Technical Indicator Dashboard snapshot journal for every selected stock.
+- Sector divergence view in the Technical Snapshot Journal comparing AMAT/SNDK/INTC against AAPL/ABBV.
 - Daily Multi-Stock AI Scanner reference archive with one-month through one-year history views.
 - Automatic daily Top 50 autosave for scanner results, technical snapshots, signal journal rows, and Excel signal reports.
-- Signal accuracy analysis by final signal after 1, 5, 10, or 20 trading days, with daily recording and 1-month to 1-year journal views.
+- Signal accuracy analysis by final signal after 1, 5, 10, or 20 trading days, with Strong Buy vs Synergy Strong Buy comparison and Hold support validation.
 - Options AI Scanner for paper-only single-leg call/put candidates using Alpaca option contracts.
 - Short Strategy Stock Scanner for educational low-float short setup research: Gap Up Short, Bounce Short, First Red Day, and Watchlist Monitor.
 - Options Paper Trading page for paper limit orders on selected or manually entered option contracts.
@@ -21,6 +23,7 @@ Streamlit dashboard and paper-trading bot for universal multi-stock analysis acr
 - Individual Stock Analysis includes EMA 20, EMA 60, EMA 250, Daily Session VWAP, Anchored VWAP, and renamed Cumulative VWAP.
 - Random Forest and optional XGBoost training with time-series splits.
 - Individual and portfolio backtesting with cost and slippage.
+- ATR-based Risk Management calculator with a default 2.0 reward:risk lock.
 - Alpaca paper-trading helpers only. No live trading implementation.
 
 ## Pages
