@@ -29,16 +29,16 @@ Streamlit dashboard and paper-trading bot for universal multi-stock analysis acr
 
 ## Pages
 
-1. Market Overview
-2. Multi-Stock AI Scanner
-3. Short Strategy Stock Scanner
-4. Options AI Scanner
-5. Individual Stock Analysis
-6. Technical Indicator Dashboard
-7. AI Prediction Model
-8. Backtesting
-9. Signal Accuracy Analysis
-10. Scanner Reference Guide
+1. Scanner Reference Guide
+2. Market Overview
+3. Multi-Stock AI Scanner
+4. Short Strategy Stock Scanner
+5. Options AI Scanner
+6. Individual Stock Analysis
+7. Technical Indicator Dashboard
+8. AI Prediction Model
+9. Backtesting
+10. Signal Accuracy Analysis
 11. Paper Trading Bot
 12. Options Paper Trading
 13. Risk Management

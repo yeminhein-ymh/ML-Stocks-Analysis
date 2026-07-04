@@ -2863,6 +2863,7 @@ def main() -> None:
     page = st.sidebar.radio(
         "Dashboard pages",
         [
+            "Scanner Reference Guide",
             "Market Overview",
             "Multi-Stock AI Scanner",
             "Short Strategy Stock Scanner",
@@ -2872,7 +2873,6 @@ def main() -> None:
             "AI Prediction Model",
             "Backtesting",
             "Signal Accuracy Analysis",
-            "Scanner Reference Guide",
             "Paper Trading Bot",
             "Options Paper Trading",
             "Risk Management",
@@ -2885,7 +2885,9 @@ def main() -> None:
         selected = scanner_universe([], 50)
     st.session_state["selected_stocks_for_options"] = selected
 
-    if page == "Market Overview":
+    if page == "Scanner Reference Guide":
+        page_scanner_reference_guide()
+    elif page == "Market Overview":
         page_market_overview(selected)
     elif page == "Multi-Stock AI Scanner":
         page_multi_stock_scanner(selected, allow_penny)
@@ -2903,8 +2905,6 @@ def main() -> None:
         page_backtesting(selected)
     elif page == "Signal Accuracy Analysis":
         page_signal_accuracy_analysis(selected, allow_penny)
-    elif page == "Scanner Reference Guide":
-        page_scanner_reference_guide()
     elif page == "Paper Trading Bot":
         page_paper_trading(selected, allow_penny)
     elif page == "Options Paper Trading":
