@@ -6,6 +6,7 @@ Streamlit dashboard and paper-trading bot for universal multi-stock analysis acr
 
 - Manual entry for any US ticker.
 - Multi-select scanning for 5, 10, 20, 50, or 100 symbols.
+- Market Overview cards for S&P 500, Nasdaq-100, Dow Jones, Russell 2000, gold, and silver ETFs.
 - Default watchlist: NVDA, AMZN, META, GOOGL, PLTR, MU, SNDK, NBIS, AAPL, MSFT, TSLA, AMD, AVGO, SMCI, NFLX, ARM, TSM, ORCL, CRM, QCOM, INTC, COIN, MSTR, SOFI, HOOD, JPM, BAC, XOM, NEE, ENPH, FSLR.
 - CSV watchlist upload and saved custom watchlists.
 - Stock screener for formula suitability.

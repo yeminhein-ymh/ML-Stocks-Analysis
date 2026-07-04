@@ -1894,14 +1894,27 @@ def page_short_strategy_scanner(selected: list[str]) -> None:
 def page_market_overview(selected: list[str]) -> None:
     st.header("Market Overview")
     disclaimer()
-    overview = fetch_last_prices(["SPY", "QQQ", "DIA", "IWM", *selected[:12]])
+    market_labels = {
+        "SPY": "SPDR S&P 500 ETF Trust (SPY)",
+        "QQQ": "Invesco Nasdaq-100 ETF (QQQ)",
+        "DIA": "SPDR Dow Jones Industrial Average ETF (DIA)",
+        "IWM": "iShares Russell 2000 Small-Cap ETF (IWM)",
+        "GLD": "SPDR Gold Shares (GLD)",
+        "SLV": "iShares Silver Trust (SLV)",
+    }
+    core_markets = list(market_labels)
+    overview = fetch_last_prices([*core_markets, *selected[:12]])
     if overview.empty:
         st.warning(market_data_healthcheck())
         st.caption("The dashboard is working, but live price data could not be downloaded.")
         return
-    cols = st.columns(4)
-    for idx, row in overview.head(4).iterrows():
-        cols[idx % 4].metric(row["Ticker"], f"${row['Price']:.2f}", f"{row['Daily Change %']:.2f}%")
+    overview["Market name"] = overview["Ticker"].map(market_labels).fillna(overview["Ticker"])
+    overview["Sort order"] = overview["Ticker"].apply(lambda ticker: core_markets.index(ticker) if ticker in core_markets else len(core_markets))
+    overview = overview.sort_values(["Sort order", "Ticker"]).drop(columns="Sort order")
+    core_overview = overview[overview["Ticker"].isin(core_markets)].copy()
+    cols = st.columns(3)
+    for idx, row in core_overview.iterrows():
+        cols[idx % 3].metric(row["Market name"], f"${row['Price']:.2f}", f"{row['Daily Change %']:.2f}%")
     st.dataframe(format_scan_table(overview), use_container_width=True, hide_index=True)
 
 
