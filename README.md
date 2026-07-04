@@ -10,6 +10,7 @@ Streamlit dashboard and paper-trading bot for universal multi-stock analysis acr
 - CSV watchlist upload and saved custom watchlists.
 - Stock screener for formula suitability.
 - Signal Synergy filters on the Multi-Stock AI Scanner: High Conviction Only, Buy-below-70% AI warning, and AI conviction highlighting.
+- Scanner Reference Guide explaining Synergy Strong Buy, Strong Buy sweet spot, final signals, core indicators, and filter usage for new users.
 - Daily signal journal for scanner and technical-indicator snapshots.
 - Daily, weekly, and monthly Technical Indicator Dashboard snapshot journal for every selected stock.
 - Sector divergence view in the Technical Snapshot Journal comparing AMAT/SNDK/INTC against AAPL/ABBV.
@@ -37,11 +38,12 @@ Streamlit dashboard and paper-trading bot for universal multi-stock analysis acr
 7. AI Prediction Model
 8. Backtesting
 9. Signal Accuracy Analysis
-10. Paper Trading Bot
-11. Options Paper Trading
-12. Risk Management
-13. Portfolio Allocation
-14. Watchlist Manager
+10. Scanner Reference Guide
+11. Paper Trading Bot
+12. Options Paper Trading
+13. Risk Management
+14. Portfolio Allocation
+15. Watchlist Manager
 
 ## Install
 

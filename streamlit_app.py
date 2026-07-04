@@ -2783,6 +2783,78 @@ def page_signal_accuracy_analysis(selected: list[str], allow_penny: bool) -> Non
     st.download_button("Download full signal journal", full_records.to_csv(index=False), "daily_signal_analysis_full.csv", "text/csv")
 
 
+def page_scanner_reference_guide() -> None:
+    st.header("Scanner Reference Guide")
+    disclaimer()
+    st.caption("Definitions for the Multi-Stock AI Scanner, Signal Accuracy Analysis, and technical snapshot pages.")
+
+    st.subheader("Synergy Strong Buy")
+    st.write("A Synergy Strong Buy is a Strong Buy signal where the main technical indicators agree with each other.")
+    st.table(
+        pd.DataFrame(
+            [
+                {"Input": "Final signal", "Required value": "Strong Buy", "Meaning": "The scanner already sees a high-quality bullish setup."},
+                {"Input": "RSI", "Required value": "60 to 75", "Meaning": "Momentum is strong, but not extremely overbought."},
+                {"Input": "MACD signal", "Required value": "Bullish", "Meaning": "MACD is confirming upside momentum."},
+                {"Input": "VWAP status", "Required value": "Above VWAP", "Meaning": "Price is trading above the average intraday or cumulative value area used by the scanner."},
+                {"Input": "Visual cue", "Required value": "Checked Synergy Strong Buy + quality note", "Meaning": "The scanner note says RSI/MACD/VWAP synergy confirmed."},
+            ]
+        )
+    )
+
+    st.subheader("Strong Buy Sweet Spot")
+    st.write("The Strong Buy sweet spot is based only on AI bullish probability, not on RSI, MACD, or VWAP.")
+    st.table(
+        pd.DataFrame(
+            [
+                {"Input": "AI bullish probability", "Required value": "82.5% to 90%", "Meaning": "The AI model has high bullish conviction without being treated as an extreme outlier."},
+                {"Input": "Purpose", "Required value": "AI confidence band", "Meaning": "Highlights statistically strong ideas even when some technical indicators are mixed."},
+                {"Input": "Visual cue", "Required value": "Highlighted AI bullish probability cell", "Meaning": "The scanner color-codes this range in the results table."},
+            ]
+        )
+    )
+
+    st.subheader("Signal Quality Levels")
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {"Term": "Strong Buy", "Definition": "The scanner's strongest bullish final signal after suitability, trend, AI probability, volume, ATR, and reward:risk checks."},
+                {"Term": "Buy", "Definition": "Bullish setup, but with fewer confirmed rules than Strong Buy."},
+                {"Term": "Hold", "Definition": "Neutral setup. Often used when direction is unclear or the stock is near support/resistance."},
+                {"Term": "Sell", "Definition": "Bearish or weakening setup based on AI probability, trend, RSI, MACD, VWAP, or risk/reward."},
+                {"Term": "Avoid", "Definition": "Not suitable for the strategy, often due to liquidity, price, ATR, historical data, or risk filters."},
+                {"Term": "Buy below 70% AI warning", "Definition": "A Buy signal where AI bullish probability is below 70%; the scanner can hide these lower-conviction ideas."},
+            ]
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.subheader("Core Indicator Definitions")
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {"Indicator": "RSI", "How to read it": "Momentum oscillator. 60-75 is treated as strong bullish momentum for Synergy Strong Buy."},
+                {"Indicator": "MACD signal", "How to read it": "Bullish means MACD is above its signal line; Bearish means momentum is weakening."},
+                {"Indicator": "VWAP status", "How to read it": "Above VWAP supports bullish intraday/value positioning; Below VWAP supports caution."},
+                {"Indicator": "ATR %", "How to read it": "Volatility as a percent of price. The app uses it for suitability and ATR-based risk management."},
+                {"Indicator": "Risk-reward ratio", "How to read it": "Expected reward divided by risk. The default minimum target is 1:2."},
+                {"Indicator": "Suitability score", "How to read it": "A liquidity, price, ATR, dollar-volume, and history quality score before trusting AI signals."},
+                {"Indicator": "AI bearish probability", "How to read it": "Higher values warn that the model sees downside risk or poor bullish follow-through."},
+            ]
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.subheader("How To Use The Filters")
+    st.info(
+        "Start with the Multi-Stock AI Scanner. Use High Conviction Only when you want fewer but cleaner trade ideas. "
+        "Use the Strong Buy sweet spot to find high AI conviction. Prefer stocks that pass suitability, stay above VWAP, "
+        "and still offer at least a 1:2 reward:risk setup."
+    )
+
+
 def main() -> None:
     inject_style()
     st.title("Universal AI Stock Analysis Dashboard")
@@ -2800,6 +2872,7 @@ def main() -> None:
             "AI Prediction Model",
             "Backtesting",
             "Signal Accuracy Analysis",
+            "Scanner Reference Guide",
             "Paper Trading Bot",
             "Options Paper Trading",
             "Risk Management",
@@ -2830,6 +2903,8 @@ def main() -> None:
         page_backtesting(selected)
     elif page == "Signal Accuracy Analysis":
         page_signal_accuracy_analysis(selected, allow_penny)
+    elif page == "Scanner Reference Guide":
+        page_scanner_reference_guide()
     elif page == "Paper Trading Bot":
         page_paper_trading(selected, allow_penny)
     elif page == "Options Paper Trading":
