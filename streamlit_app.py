@@ -1703,10 +1703,11 @@ def format_prediction_matrix(df: pd.DataFrame) -> pd.io.formats.style.Styler:
             return "background-color: #f8ecd7; color: #4a2d0a; font-weight: 700; text-align: center; border-radius: 8px;"
         return ""
 
-    return shown.style.format({"Today": "{:+.2f}% today", "AI bullish probability": "{:.1f}%"}).applymap(
-        style_prediction,
-        subset=[col for col in ["1 week", "1 month", "3 months", "1 year"] if col in shown.columns],
-    )
+    styler = shown.style.format({"Today": "{:+.2f}% today", "AI bullish probability": "{:.1f}%"})
+    prediction_cols = [col for col in ["1 week", "1 month", "3 months", "1 year"] if col in shown.columns]
+    if hasattr(styler, "map"):
+        return styler.map(style_prediction, subset=prediction_cols)
+    return styler.applymap(style_prediction, subset=prediction_cols)
 
 
 def page_prediction_matrix(selected: list[str], allow_penny: bool) -> None:
