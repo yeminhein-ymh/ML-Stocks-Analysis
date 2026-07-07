@@ -1512,6 +1512,232 @@ def render_scanner_history_reference() -> None:
     )
 
 
+COMPANY_NAME_OVERRIDES = {
+    "AAPL": "Apple",
+    "ABBV": "AbbVie",
+    "AMAT": "Applied Materials",
+    "AMD": "Advanced Micro Devices",
+    "AMZN": "Amazon",
+    "ARM": "Arm Holdings",
+    "AVGO": "Broadcom",
+    "BAC": "Bank of America",
+    "COIN": "Coinbase",
+    "CRM": "Salesforce",
+    "ENPH": "Enphase Energy",
+    "FSLR": "First Solar",
+    "GOOGL": "Alphabet",
+    "HOOD": "Robinhood",
+    "INTC": "Intel",
+    "JPM": "JPMorgan Chase",
+    "META": "Meta Platforms",
+    "MSTR": "MicroStrategy",
+    "MU": "Micron",
+    "NBIS": "Nebius",
+    "NFLX": "Netflix",
+    "NVDA": "Nvidia",
+    "ORCL": "Oracle",
+    "PLTR": "Palantir",
+    "QCOM": "Qualcomm",
+    "SMCI": "Super Micro Computer",
+    "SNDK": "SanDisk",
+    "SOFI": "SoFi",
+    "TSLA": "Tesla",
+    "TSM": "Taiwan Semiconductor",
+    "XOM": "Exxon Mobil",
+}
+
+
+def ticker_display_name(ticker: str) -> str:
+    ticker = str(ticker).upper()
+    return COMPANY_NAME_OVERRIDES.get(ticker, ticker)
+
+
+def latest_rows_by_ticker(rows: pd.DataFrame, date_col: str) -> pd.DataFrame:
+    if rows.empty or "Ticker" not in rows:
+        return pd.DataFrame()
+    output = rows.copy()
+    output[date_col] = pd.to_datetime(output[date_col], errors="coerce")
+    output = output.sort_values([date_col, "Ticker"]).drop_duplicates("Ticker", keep="last")
+    return output
+
+
+def _prediction_score(row: pd.Series, horizon: str, consistency: float = 0.0) -> float:
+    bullish = pd.to_numeric(row.get("AI bullish probability"), errors="coerce")
+    bearish = pd.to_numeric(row.get("AI bearish probability"), errors="coerce")
+    rsi = pd.to_numeric(row.get("RSI"), errors="coerce")
+    suitability = pd.to_numeric(row.get("Suitability score"), errors="coerce")
+    risk_reward = pd.to_numeric(row.get("Risk-reward ratio"), errors="coerce")
+    daily_change = pd.to_numeric(row.get("Daily Change %"), errors="coerce")
+    period_return = pd.to_numeric(row.get("Period return %"), errors="coerce")
+    score = 50.0
+    if pd.notna(bullish):
+        score += (float(bullish) - 50) * 0.42
+    if pd.notna(bearish):
+        score -= max(0.0, float(bearish) - 45) * 0.34
+    signal = str(row.get("Final signal", ""))
+    if signal == "Strong Buy":
+        score += 13
+    elif signal == "Buy":
+        score += 7
+    elif signal == "Hold":
+        score += 0
+    elif signal == "Sell":
+        score -= 10
+    elif signal == "Avoid":
+        score -= 17
+    if str(row.get("MACD signal", "")).lower().find("bullish") >= 0:
+        score += 6
+    elif str(row.get("MACD signal", "")).lower().find("bearish") >= 0:
+        score -= 6
+    if str(row.get("VWAP status", "")).lower().find("above") >= 0:
+        score += 5
+    elif str(row.get("VWAP status", "")).lower().find("below") >= 0:
+        score -= 5
+    trend = str(row.get("Trend", "")).lower()
+    if "uptrend" in trend:
+        score += 7
+    elif "downtrend" in trend:
+        score -= 8
+    elif "sideways" in trend:
+        score -= 1
+    if pd.notna(rsi):
+        if 60 <= float(rsi) <= 75:
+            score += 6
+        elif float(rsi) < 40 or float(rsi) > 78:
+            score -= 7
+    if pd.notna(suitability):
+        score += (float(suitability) - 70) * 0.10
+    if pd.notna(risk_reward):
+        score += min(8.0, max(-8.0, (float(risk_reward) - 2.0) * 4.0))
+    if pd.notna(daily_change):
+        score += max(-5.0, min(5.0, float(daily_change) * 0.45))
+    if pd.notna(period_return):
+        score += max(-6.0, min(6.0, float(period_return) * 0.35))
+    if horizon == "1 week":
+        score += 0
+    elif horizon == "1 month":
+        score = score * 0.92 + (50 + consistency * 25) * 0.08
+    elif horizon == "3 months":
+        score = score * 0.82 + (50 + consistency * 32) * 0.18
+    elif horizon == "1 year":
+        score = score * 0.70 + (50 + consistency * 40) * 0.30
+    return max(0.0, min(100.0, score))
+
+
+def prediction_label(score: float) -> str:
+    if score >= 62:
+        return "Bullish"
+    if score <= 42:
+        return "Bearish"
+    return "Mixed"
+
+
+def build_prediction_matrix(limit: int = 50) -> pd.DataFrame:
+    scanner = load_scanner_history()
+    technical = load_technical_snapshots()
+    if scanner.empty and technical.empty:
+        return pd.DataFrame()
+    latest_scanner = latest_rows_by_ticker(scanner, "Archive date") if not scanner.empty else pd.DataFrame()
+    if not technical.empty:
+        daily_technical = technical[technical["Period"].astype(str) == "Daily"].copy() if "Period" in technical else technical.copy()
+        latest_technical = latest_rows_by_ticker(daily_technical, "Record date")
+    else:
+        latest_technical = pd.DataFrame()
+    if not latest_scanner.empty and not latest_technical.empty:
+        merged = latest_scanner.merge(
+            latest_technical,
+            on="Ticker",
+            how="outer",
+            suffixes=("", "_Technical"),
+        )
+        for col in ["RSI", "MACD signal", "VWAP status", "Trend", "AI bullish probability", "AI bearish probability", "Suitability score", "Final signal"]:
+            tech_col = f"{col}_Technical"
+            if tech_col in merged:
+                merged[col] = merged[col].combine_first(merged[tech_col])
+    else:
+        merged = latest_scanner if not latest_scanner.empty else latest_technical.rename(columns={"Price": "Entry price"})
+    if merged.empty:
+        return pd.DataFrame()
+    history = scanner.copy() if not scanner.empty else pd.DataFrame()
+    consistency_map = {}
+    if not history.empty and "Final signal" in history:
+        history["Archive date"] = pd.to_datetime(history["Archive date"], errors="coerce")
+        recent = history[history["Archive date"] >= history["Archive date"].max() - pd.Timedelta(days=90)].copy()
+        for ticker, group in recent.groupby("Ticker"):
+            signals = group["Final signal"].astype(str)
+            bullish_share = signals.isin(["Strong Buy", "Buy"]).mean()
+            bearish_share = signals.isin(["Sell", "Avoid"]).mean()
+            consistency_map[str(ticker)] = float(bullish_share - bearish_share)
+    rows = []
+    rank_source = add_signal_synergy_columns(merged.copy())
+    rank_source["Rank score"] = rank_source.apply(lambda row: _prediction_score(row, "1 month", consistency_map.get(str(row.get("Ticker")), 0.0)), axis=1)
+    rank_source = rank_source.sort_values(["Rank score", "AI bullish probability"], ascending=False).head(limit)
+    for _, row in rank_source.iterrows():
+        ticker = str(row.get("Ticker", "")).upper()
+        consistency = consistency_map.get(ticker, 0.0)
+        output = {
+            "Ticker": ticker,
+            "Company": ticker_display_name(ticker),
+            "Today": pd.to_numeric(row.get("Daily Change %"), errors="coerce"),
+            "Final signal": row.get("Final signal"),
+            "AI bullish probability": row.get("AI bullish probability"),
+        }
+        for horizon in ["1 week", "1 month", "3 months", "1 year"]:
+            score = _prediction_score(row, horizon, consistency)
+            output[horizon] = prediction_label(score)
+            output[f"{horizon} score"] = score
+        rows.append(output)
+    return pd.DataFrame(rows)
+
+
+def format_prediction_matrix(df: pd.DataFrame) -> pd.io.formats.style.Styler:
+    display_cols = ["Ticker", "Company", "Today", "1 week", "1 month", "3 months", "1 year", "Final signal", "AI bullish probability"]
+    shown = df[[col for col in display_cols if col in df.columns]].copy()
+
+    def style_prediction(value):
+        if value == "Bullish":
+            return "background-color: #e7f3dc; color: #153f08; font-weight: 700; text-align: center; border-radius: 8px;"
+        if value == "Bearish":
+            return "background-color: #fde9e9; color: #5b1414; font-weight: 700; text-align: center; border-radius: 8px;"
+        if value == "Mixed":
+            return "background-color: #f8ecd7; color: #4a2d0a; font-weight: 700; text-align: center; border-radius: 8px;"
+        return ""
+
+    return shown.style.format({"Today": "{:+.2f}% today", "AI bullish probability": "{:.1f}%"}).applymap(
+        style_prediction,
+        subset=[col for col in ["1 week", "1 month", "3 months", "1 year"] if col in shown.columns],
+    )
+
+
+def page_prediction_matrix(selected: list[str], allow_penny: bool) -> None:
+    st.header("Top 50 Prediction Matrix")
+    st.caption("Uses saved Multi-Stock Scanner Reference Archive rows plus Daily Technical Snapshot Journal rows. The labels are model-style directional estimates, not guaranteed outcomes.")
+    c1, c2 = st.columns(2)
+    limit = c1.select_slider("Prediction universe size", options=[10, 20, 50], value=50)
+    force_scan = c2.toggle("Use fresh scan if archive is empty", value=True)
+    table = build_prediction_matrix(limit=int(limit))
+    if table.empty and force_scan:
+        with st.spinner("No archive data found. Running a fresh top-50 scan for a starter prediction table..."):
+            scan = add_signal_synergy_columns(scan_stocks(scanner_universe(selected, int(limit)), limit=int(limit), allow_penny_stocks=allow_penny))
+            today = pd.Timestamp.now().date().isoformat()
+            scan["Archive date"] = today
+            scan["Record date"] = today
+            record_scanner_history(scan, int(limit))
+            table = build_prediction_matrix(limit=int(limit))
+    if table.empty:
+        st.info("No saved archive data is available yet. Run the Multi-Stock AI Scanner with daily archive enabled, or record Daily technical snapshots.")
+        return
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Tickers", len(table))
+    m2.metric("Bullish 1 week", int((table["1 week"] == "Bullish").sum()))
+    m3.metric("Bullish 1 year", int((table["1 year"] == "Bullish").sum()))
+    st.dataframe(format_prediction_matrix(table), use_container_width=True, hide_index=True)
+    with st.expander("Show score details"):
+        detail_cols = ["Ticker", "Company", "1 week score", "1 month score", "3 months score", "1 year score", "Final signal", "AI bullish probability"]
+        st.dataframe(table[[col for col in detail_cols if col in table.columns]].style.format({col: "{:.1f}" for col in detail_cols if col.endswith("score")}), use_container_width=True, hide_index=True)
+    st.download_button("Download prediction matrix", table.to_csv(index=False), "top50_prediction_matrix.csv", "text/csv")
+
+
 def price_chart(df: pd.DataFrame, ticker: str) -> go.Figure:
     df = df.copy()
     if "EMA_20" not in df and "Close" in df:
@@ -2879,6 +3105,7 @@ def main() -> None:
             "Scanner Reference Guide",
             "Market Overview",
             "Multi-Stock AI Scanner",
+            "Prediction Matrix",
             "Short Strategy Stock Scanner",
             "Options AI Scanner",
             "Individual Stock Analysis",
@@ -2904,6 +3131,8 @@ def main() -> None:
         page_market_overview(selected)
     elif page == "Multi-Stock AI Scanner":
         page_multi_stock_scanner(selected, allow_penny)
+    elif page == "Prediction Matrix":
+        page_prediction_matrix(selected, allow_penny)
     elif page == "Short Strategy Stock Scanner":
         page_short_strategy_scanner(selected)
     elif page == "Options AI Scanner":
