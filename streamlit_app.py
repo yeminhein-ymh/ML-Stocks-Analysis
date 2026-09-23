@@ -644,7 +644,14 @@ def ticker_selector(max_default: int = 50) -> list[str]:
     if manual:
         tickers.extend(manual.split(","))
     tickers = normalize_tickers(tickers)
-    selected = st.sidebar.multiselect("Selected stocks", tickers, default=tickers[:max_default])
+    default_universe = ", ".join(tickers[:max_default])
+    universe_text = st.sidebar.text_area(
+        "Universe (comma-separated)",
+        value=default_universe,
+        height=120,
+        help="Paste or type tickers separated by commas, spaces, or new lines.",
+    )
+    selected = normalize_tickers(re.split(r"[\s,]+", universe_text))
     if st.sidebar.button("Save selected as custom watchlist"):
         save_watchlist(f"Custom {pd.Timestamp.now().strftime('%Y-%m-%d %H%M')}", selected)
         st.sidebar.success("Watchlist saved.")
